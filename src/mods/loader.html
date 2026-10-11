@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Spotifast mods</title>
+<style>
+  /* Spotify's default palette, as Spicetify themes name it. */
+  :root {
+    color-scheme: dark;
+    --spice-text: #ffffff; --spice-rgb-text: 255,255,255;
+    --spice-subtext: #b3b3b3; --spice-rgb-subtext: 179,179,179;
+    --spice-main: #121212; --spice-rgb-main: 18,18,18;
+    --spice-main-elevated: #242424; --spice-rgb-main-elevated: 36,36,36;
+    --spice-highlight: #1a1a1a; --spice-rgb-highlight: 26,26,26;
+    --spice-highlight-elevated: #2a2a2a; --spice-rgb-highlight-elevated: 42,42,42;
+    --spice-sidebar: #000000; --spice-rgb-sidebar: 0,0,0;
+    --spice-player: #181818; --spice-rgb-player: 24,24,24;
+    --spice-card: #282828; --spice-rgb-card: 40,40,40;
+    --spice-shadow: #000000; --spice-rgb-shadow: 0,0,0;
+    --spice-selected-row: #ffffff; --spice-rgb-selected-row: 255,255,255;
+    --spice-button: #1db954; --spice-rgb-button: 29,185,84;
+    --spice-button-active: #1ed760; --spice-rgb-button-active: 30,215,96;
+    --spice-button-disabled: #535353; --spice-rgb-button-disabled: 83,83,83;
+    --spice-accent: #1ed760; --spice-rgb-accent: 30,215,96;
+    --spice-tab-active: #333333; --spice-rgb-tab-active: 51,51,51;
+    --spice-notification: #4687d6; --spice-rgb-notification: 70,135,214;
+    --spice-notification-error: #e22134; --spice-rgb-notification-error: 226,33,52;
+    --spice-misc: #7f7f7f; --spice-rgb-misc: 127,127,127;
+  }
+  html, body { margin: 0; height: 100%; background: var(--spice-main); color: var(--spice-text);
+    font-family: "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+  #app { height: 100%; overflow: auto; }
+  #toolbar { position: fixed; top: 8px; right: 8px; z-index: 2147483647; display: flex; gap: 6px; }
+  #toolbar button { display: grid; place-items: center; min-width: 32px; height: 32px; padding: 0 8px;
+    border: 0; border-radius: 16px; background: rgba(0,0,0,.55); color: var(--spice-text); cursor: pointer; }
+  #toolbar button:hover { background: rgba(255,255,255,.18); }
+  #toolbar svg { width: 16px; height: 16px; fill: currentColor; }
+  #message { padding: 32px; color: var(--spice-subtext); }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mousetrap@1.6.5/mousetrap.min.js"></script>
+</head>
+<body>
+<div id="toolbar"></div>
+<div id="app"></div>
+<script>
+// Loads a Spicetify custom app from the mods folder the way Spicetify does:
+// subfiles_extension as global scripts first, then index.js and subfiles
+// joined into one strict function whose `render` is the app's component.
+(async () => {
+  const apps = await (await fetch("/apps.json")).json();
+  const name = new URLSearchParams(location.search).get("app") || apps[0];
+  if (!name) {
+    location.replace("/demo.html");
+    return;
+  }
+  const base = `/${encodeURIComponent(name)}/`;
+  const text = async (path) => {
+    const response = await fetch(base + path);
+    if (!response.ok) throw new Error(`${name}/${path}: ${response.status}`);
+    return response.text();
+  };
+  const run = (code, label) => {
+    const script = document.createElement("script");
+    script.textContent = `${code}\n//# sourceURL=${location.origin}${base}${label}`;
+    document.head.append(script);
+  };
+  const manifest = JSON.parse(await text("manifest.json"));
+  document.title = typeof manifest.name === "string" ? manifest.name : name;
+  const style = document.createElement("style");
+  style.textContent = await text("style.css").catch(() => "");
+  document.head.append(style);
+
+  Spicetify.Platform.History.location.pathname = `/${name}`;
+  for (const file of manifest.subfiles_extension || []) {
+    run(await text(file), file);
+  }
+  const parts = await Promise.all(["index.js", ...(manifest.subfiles || [])].map(text));
+  run(`window.__spotifastApp = (() => {"use strict";\n${parts.join("\n")}\nreturn render;})();`, "index.js");
+  if (typeof window.__spotifastApp !== "function") {
+    throw new Error(`${name} did not define render()`);
+  }
+  ReactDOM.createRoot(document.getElementById("app")).render(React.createElement(window.__spotifastApp));
+})().catch((error) => {
+  console.error("Spotifast loader:", error);
+  document.getElementById("app").innerHTML = '<p id="message"></p>';
+  document.getElementById("message").textContent = `Could not load the mod: ${error.message}`;
+});
+
+// Buttons mods put in Spotify's menus and playbar show here.
+const drawToolbar = () => {
+  const toolbar = document.getElementById("toolbar");
+  toolbar.replaceChildren();
+  for (const control of Spicetify._controls) {
+    const button = document.createElement("button");
+    button.title = control.label;
+    const icon = String(control.icon || "");
+    if (icon.startsWith("<svg")) button.innerHTML = icon;
+    else if (icon.startsWith("<")) button.innerHTML = `<svg viewBox="0 0 16 16">${icon}</svg>`;
+    else button.textContent = control.label;
+    button.disabled = !!control.disabled;
+    button.onclick = () => control.onClick?.(control);
+    toolbar.append(button);
+  }
+};
+addEventListener("spotifast:controls", drawToolbar);
+drawToolbar();
+</script>
+</body>
+</html>

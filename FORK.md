@@ -13,9 +13,25 @@ page. The app writes the playing item to the child's stdin as JSON lines;
 the page's commands come back on stdout and become ordinary `Action`s. The
 browser engine never loads into the app's own process.
 
-`src/mods/shim.js` gives the page a `Spicetify` object (`Player`,
-`LocalStorage`) built on that bridge, so Spicetify mods run unchanged as far
-as the shim reaches.
+`src/mods/shim.js` gives the page a `Spicetify` object built on that
+bridge, so Spicetify mods run unchanged as far as the shim reaches. Calls
+that need Spotify's own signed-in client (`CosmosAsync`, `GraphQL`,
+`Platform.RequestBuilder`) reject for now, so mods take their fallbacks.
+
+With no `index.html` in the mods folder, the built-in loader
+(`src/mods/loader.html`) runs the first Spicetify custom app it finds there
+(or `?app=<name>`) the way Spicetify does: `subfiles_extension` as global
+scripts, then `index.js` and `subfiles` in one function whose `render` is
+the app's component. Buttons a mod adds to Spotify's menus or playbar show
+in a toolbar at the top right. React 18.3.1 and Mousetrap come from
+jsDelivr.
+
+### ivLyrics
+
+Copy the ivLyrics folder (the one with `manifest.json`) into the mods
+folder as `mods/ivLyrics`. Lyrics, translation addons and its settings
+(toolbar → "ivLyrics config") work; the Spotify lyrics provider, Spotify
+profile and album colours don't yet, since they use Spotify's client.
 
 - Mods folder: `mods` in the config folder (Windows: `%APPDATA%\paolino\spotifast\config\mods`)
 - Webview data: `mods-webview` in the cache folder

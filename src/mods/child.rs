@@ -4,7 +4,8 @@
 //! `window.__spotifast.receive`. Messages the page posts with
 //! `window.ipc.postMessage` go to stdout, one JSON object per line. The page
 //! and its files come from the mods folder through the `mods` scheme; with
-//! no `index.html` there, a built-in demo page stands in.
+//! no `index.html` there, the built-in loader runs the Spicetify custom app
+//! it finds, or shows the demo page when there is none.
 
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
@@ -19,6 +20,7 @@ use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
 use wry::{WebContext, WebView, WebViewBuilder};
 
 const SHIM: &str = include_str!("shim.js");
+const LOADER: &str = include_str!("loader.html");
 const DEMO: &str = include_str!("demo.html");
 
 /// Where a page served by the `mods` scheme lives. WebView2 and Android
@@ -199,7 +201,9 @@ fn serve(dir: &Path, request: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>>
     }
     let body = match std::fs::read(dir.join(relative)) {
         Ok(body) => Cow::Owned(body),
-        Err(_) if path == "index.html" => Cow::Borrowed(DEMO.as_bytes()),
+        Err(_) if path == "index.html" => Cow::Borrowed(LOADER.as_bytes()),
+        Err(_) if path == "demo.html" => Cow::Borrowed(DEMO.as_bytes()),
+        Err(_) if path == "apps.json" => Cow::Owned(apps(dir)),
         Err(_) => return status(StatusCode::NOT_FOUND),
     };
     let kind = match relative.extension().and_then(|ext| ext.to_str()) {
@@ -219,6 +223,20 @@ fn serve(dir: &Path, request: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>>
         .header(CONTENT_TYPE, kind)
         .body(body)
         .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// The Spicetify custom apps in the mods folder: each folder with a
+/// `manifest.json`, by name.
+fn apps(dir: &Path) -> Vec<u8> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().join("manifest.json").is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    serde_json::to_vec(&names).unwrap_or_default()
 }
 
 fn status(code: StatusCode) -> Response<Cow<'static, [u8]>> {

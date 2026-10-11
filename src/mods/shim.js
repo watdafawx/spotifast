@@ -2,7 +2,9 @@
 //
 // The app sends the playing item through window.__spotifast.receive(); the
 // page sends commands with window.ipc.postMessage(). Only what mods use is
-// here; grow it per mod, keeping Spicetify's names and shapes.
+// here, keeping Spicetify's names and shapes. Calls that need Spotify's own
+// signed-in client (CosmosAsync, GraphQL, RequestBuilder) reject for now, so
+// mods take their fallbacks.
 (() => {
   if (window.Spicetify) return;
   const listeners = {};
@@ -10,6 +12,32 @@
   let receivedAt = 0;
 
   const send = (message) => window.ipc.postMessage(JSON.stringify(message));
+  const unavailable = (what) => () => Promise.reject(new Error(`${what} is not available in Spotifast`));
+
+  // Page errors go to the app's log, so a broken mod can be diagnosed.
+  const log = (level, parts) => {
+    const message = parts
+      .map((part) => (part instanceof Error ? `${part.message}\n${part.stack}` : typeof part === "string" ? part : safeJson(part)))
+      .join(" ")
+      .slice(0, 2000);
+    send({ cmd: "log", level, message });
+  };
+  const safeJson = (value) => {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  };
+  const consoleError = console.error.bind(console);
+  console.error = (...parts) => {
+    consoleError(...parts);
+    log("error", parts);
+  };
+  addEventListener("error", (event) => log("error", [event.error || event.message, `at ${event.filename}:${event.lineno}`]));
+  addEventListener("unhandledrejection", (event) => log("error", ["unhandled rejection:", event.reason]));
+
+  // Player
   const emit = (type, data) => {
     for (const listener of listeners[type] || []) {
       try {
@@ -27,16 +55,19 @@
   const images = (url) => (url ? [{ url, label: "large" }, { url, label: "xlarge" }] : []);
   const playerData = (now) => {
     if (!now) return null;
-    const artists = now.artists.map((a) => ({ name: a.name, uri: a.uri || "" }));
+    const artists = now.artists.map((a) => ({ name: a.name, uri: a.uri || "", type: "artist" }));
     return {
       item: {
         uri: now.uri,
+        uid: now.uri,
         name: now.title,
         type: now.uri.split(":")[1] || "track",
         duration: { milliseconds: now.duration_ms },
+        duration_ms: now.duration_ms,
         artists,
         album: { name: now.album, uri: now.album_uri || "", images: images(now.art_url) },
         images: images(now.art_url),
+        isLocal: false,
         metadata: {
           title: now.title,
           artist_name: artists.map((a) => a.name).join(", "),
@@ -44,11 +75,14 @@
           album_title: now.album,
           album_uri: now.album_uri || "",
           image_url: now.art_url || "",
+          image_small_url: now.art_url || "",
           image_large_url: now.art_url || "",
           image_xlarge_url: now.art_url || "",
           duration: String(now.duration_ms),
+          duration_ms: String(now.duration_ms),
         },
       },
+      context: { uri: "", url: "", metadata: {} },
       isPaused: !now.playing,
       isBuffering: false,
       duration: now.duration_ms,
@@ -57,11 +91,14 @@
       timestamp: Date.now(),
       shuffle: now.shuffle,
       repeat: { off: 0, context: 1, track: 2 }[now.repeat] ?? 0,
+      volume: now.volume_percent / 100,
     };
   };
 
   const Player = {
     data: null,
+    // Spotify's internal player; mods reach for its queue events.
+    origin: { _events: { addListener() {}, removeListener() {} } },
     addEventListener(type, listener) {
       (listeners[type] ||= []).push(listener);
     },
@@ -89,16 +126,151 @@
     setShuffle: (on) => send({ cmd: "shuffle", on: !!on }),
     toggleShuffle: () => send({ cmd: "shuffle", on: !state?.shuffle }),
     getRepeat: () => Player.data?.repeat ?? 0,
+    setRepeat: () => {},
+    playUri: unavailable("Player.playUri"),
   };
 
+  // Storage: Spicetify.LocalStorage is plain strings; Platform's is JSON.
   const LocalStorage = {
     get: (key) => localStorage.getItem(key),
     set: (key, value) => localStorage.setItem(key, value),
     remove: (key) => localStorage.removeItem(key),
     clear: () => localStorage.clear(),
   };
+  const LocalStorageAPI = {
+    namespace: "spotifast",
+    getItem(key) {
+      const value = localStorage.getItem(`${this.namespace}:${key}`);
+      try {
+        return value === null ? null : JSON.parse(value);
+      } catch {
+        return value;
+      }
+    },
+    setItem(key, value) {
+      localStorage.setItem(`${this.namespace}:${key}`, JSON.stringify(value));
+    },
+    clearItem(key) {
+      localStorage.removeItem(`${this.namespace}:${key}`);
+    },
+  };
 
-  window.Spicetify = { Player, LocalStorage };
+  // Navigation inside the mods window: one app, its own paths.
+  const historyListeners = new Set();
+  const History = {
+    location: { pathname: "/", search: "", hash: "", state: {} },
+    entries: [],
+    push(to, pushState) {
+      const next = typeof to === "string" ? { pathname: to } : to;
+      History.entries.push(History.location);
+      History.location = { pathname: "/", search: "", hash: "", state: pushState ?? {}, ...next };
+      historyListeners.forEach((listener) => listener(History.location, "PUSH"));
+    },
+    replace(to) {
+      History.location = { ...History.location, ...(typeof to === "string" ? { pathname: to } : to) };
+      historyListeners.forEach((listener) => listener(History.location, "REPLACE"));
+    },
+    goBack() {
+      if (!History.entries.length) return;
+      History.location = History.entries.pop();
+      historyListeners.forEach((listener) => listener(History.location, "POP"));
+    },
+    listen(listener) {
+      historyListeners.add(listener);
+      return () => historyListeners.delete(listener);
+    },
+  };
+
+  // Where Spotify shows a mod's buttons (profile menu, playbar), the mods
+  // window shows a toolbar instead; see the loader.
+  const controls = new Set();
+  const changed = () => window.dispatchEvent(new Event("spotifast:controls"));
+  class Control {
+    constructor(label, icon, onClick, disabled = false, active = false, registerOnCreate = true) {
+      Object.assign(this, { label, icon, onClick, disabled, active });
+      if (registerOnCreate === true) this.register();
+    }
+    register() {
+      controls.add(this);
+      changed();
+    }
+    deregister() {
+      controls.delete(this);
+      changed();
+    }
+    setState(state) {
+      Object.assign(this, state);
+      changed();
+    }
+  }
+  class MenuItem extends Control {
+    // Spicetify.Menu.Item(name, isEnabled, onClick, icon)
+    constructor(name, isEnabled, onClick, icon) {
+      super(name, icon, onClick, false, isEnabled, false);
+    }
+  }
+
+  const URI = {
+    fromString(uri) {
+      const [, type = "", id = ""] = String(uri).split(":");
+      return { type, id, toURI: () => uri, toString: () => uri };
+    },
+    isTrack: (uri) => String(uri).startsWith("spotify:track:"),
+    isEpisode: (uri) => String(uri).startsWith("spotify:episode:"),
+  };
+
+  // Spicetify's icons are the inner markup of a 16×16 SVG.
+  const SVGIcons = {
+    play: '<path d="M3 1.7v12.6L14 8 3 1.7z"/>',
+    pause: '<path d="M3 2h3v12H3zm7 0h3v12h-3z"/>',
+    check: '<path d="M13.3 3.3 6 10.6 2.7 7.3 1.3 8.7 6 13.4l8.7-8.7z"/>',
+    heart: '<path d="M8 14s-6-3.8-6-8a3.5 3.5 0 0 1 6-2.5A3.5 3.5 0 0 1 14 6c0 4.2-6 8-6 8z"/>',
+    repeat: '<path d="M4 4h8v2l3-3-3-3v2H2v6h2zm8 8H4v-2l-3 3 3 3v-2h10V8h-2z"/>',
+    shuffle: '<path d="M11 2v2H9.5L4 12H1v2h4l5.5-8H11v2l3-3zM1 4h4l1.5 2.2-1.2 1.7L4 6H1zm9 6.2 1 1.8h0v-2l3 3-3 3v-2H9.5l-1.2-1.7z"/>',
+    search: '<path d="M7 1a6 6 0 1 0 3.7 10.7l3.6 3.6 1.4-1.4-3.6-3.6A6 6 0 0 0 7 1zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z"/>',
+  };
+
+  window.Spicetify = {
+    Player,
+    LocalStorage,
+    Platform: {
+      History,
+      LocalStorageAPI,
+      ClipboardAPI: { copy: (text) => navigator.clipboard.writeText(String(text)) },
+      Session: { username: "", accessToken: "" },
+      PlaybackAPI: { _isLocal: false },
+      PlayerAPI: {
+        get _state() {
+          return Player.data;
+        },
+      },
+      UserAPI: { getUser: async () => ({ username: "", displayName: "" }) },
+      LibraryAPI: { contains: async (...uris) => uris.map(() => false), add: unavailable("LibraryAPI.add"), remove: unavailable("LibraryAPI.remove") },
+      PlaylistAPI: { add: unavailable("PlaylistAPI.add") },
+      RootlistAPI: {},
+    },
+    CosmosAsync: { get: unavailable("CosmosAsync"), post: unavailable("CosmosAsync"), put: unavailable("CosmosAsync"), del: unavailable("CosmosAsync") },
+    GraphQL: { Definitions: {}, Request: unavailable("GraphQL") },
+    getAudioData: unavailable("getAudioData"),
+    Locale: { getLocale: () => (navigator.language || "en").split("-")[0] },
+    Config: { version: "2.40.0", current_theme: "", color_scheme: "", username: "" },
+    Queue: { nextTracks: [], prevTracks: [] },
+    URI,
+    SVGIcons,
+    Menu: { Item: MenuItem },
+    Playbar: { Button: Control, Widget: Control },
+    // The loader puts these libraries on window before any mod runs.
+    get React() {
+      return window.React;
+    },
+    get ReactDOM() {
+      return window.ReactDOM;
+    },
+    get Mousetrap() {
+      return window.Mousetrap;
+    },
+    _controls: controls,
+  };
 
   window.__spotifast = {
     receive(message) {

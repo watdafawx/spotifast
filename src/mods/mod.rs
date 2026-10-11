@@ -65,21 +65,36 @@ enum Command {
     TogglePlay,
     Next,
     Previous,
-    Seek { ms: u32 },
-    Volume { percent: u8 },
-    Shuffle { on: bool },
+    Seek {
+        ms: u32,
+    },
+    Volume {
+        percent: u8,
+    },
+    Shuffle {
+        on: bool,
+    },
+    /// An error on the page, for the app's log.
+    Log {
+        level: String,
+        message: String,
+    },
 }
 
 impl Command {
-    fn action(self) -> Action {
-        match self {
+    fn action(self) -> Option<Action> {
+        Some(match self {
             Command::TogglePlay => Action::TogglePlay,
             Command::Next => Action::Next,
             Command::Previous => Action::Previous,
             Command::Seek { ms } => Action::Seek(ms),
             Command::Volume { percent } => Action::SetVolume(percent.min(100)),
             Command::Shuffle { on } => Action::SetShuffle(on),
-        }
+            Command::Log { level, message } => {
+                log::warn!("Mods page {level}: {message}");
+                return None;
+            }
+        })
     }
 }
 
@@ -118,7 +133,7 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         return;
     };
     app.actions
-        .extend(host.commands.try_iter().map(Command::action));
+        .extend(host.commands.try_iter().filter_map(Command::action));
     let state = app.now_playing().map(|now| State {
         uri: now.uri,
         title: now.title,
@@ -246,8 +261,9 @@ mod tests {
     fn page_commands_become_actions() {
         let action = |line: &str| {
             serde_json::from_str::<Command>(line)
-                .map(|command| format!("{:?}", command.action()))
                 .ok()
+                .and_then(Command::action)
+                .map(|action| format!("{action:?}"))
         };
         assert_eq!(
             action(r#"{"cmd":"toggle_play"}"#).as_deref(),
@@ -267,5 +283,9 @@ mod tests {
             Some("SetVolume(42)")
         );
         assert_eq!(action(r#"{"cmd":"echo","title":"x"}"#), None);
+        assert_eq!(
+            action(r#"{"cmd":"log","level":"error","message":"x"}"#),
+            None
+        );
     }
 }
