@@ -1,5 +1,7 @@
 # Fork only: merge crmne/spotifast into the mods branch every day.
-# A clean merge that builds is pushed; anything else opens an issue.
+# A clean merge that builds is pushed. Anything else fails the run, with the
+# conflicting files in its summary; GitHub emails the owner about a failed
+# scheduled run (forks have Issues off, so no issue is opened).
 name: Sync upstream
 
 on:
@@ -9,7 +11,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 jobs:
   sync:
@@ -28,8 +29,11 @@ jobs:
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/crmne/spotifast
           git fetch upstream main
-          if git merge --no-edit upstream/main; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "mods already has everything on upstream/main." >> "$GITHUB_STEP_SUMMARY"
+            echo "result=current" >> "$GITHUB_OUTPUT"
+          elif git merge --no-edit upstream/main; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
           elif [ "$(git diff --name-only --diff-filter=U)" = "Cargo.lock" ]; then
             # Only the lockfile clashed: take upstream's and let cargo add
             # back the fork's crates (wry and what it pulls in).
@@ -37,29 +41,30 @@ jobs:
             cargo metadata --features mods --format-version 1 > /dev/null
             git add Cargo.lock
             git commit --no-edit
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "result=merged" >> "$GITHUB_OUTPUT"
           else
-            git diff --name-only --diff-filter=U > conflicts.txt
+            {
+              echo "Merging upstream/main into mods needs a hand:"
+              echo
+              echo '    git fetch upstream && git merge upstream/main'
+              echo
+              echo "Conflicting files:"
+              git diff --name-only --diff-filter=U | sed 's/^/- /'
+            } >> "$GITHUB_STEP_SUMMARY"
             git merge --abort
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
 
       - name: Build and test
-        if: steps.merge.outputs.ok == 'true'
+        if: steps.merge.outputs.result == 'merged'
         run: |
           cargo build --no-default-features --features mods
           cargo test --no-default-features --features mods --lib mods::
 
       - name: Push
-        if: steps.merge.outputs.ok == 'true'
-        run: git push origin mods
-
-      - name: Report conflicts
-        if: steps.merge.outputs.ok == 'false' || failure()
+        if: steps.merge.outputs.result == 'merged'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          body="Merging upstream/main into mods needs a hand. Run: git fetch upstream && git merge upstream/main"
-          [ -f conflicts.txt ] && body="$body"$'\n\nConflicts:\n'"$(cat conflicts.txt)"
-          gh issue create --title "Upstream sync failed ($(date -u +%F))" --body "$body"
+          # Commits pushed to mods while this ran come along, not get refused.
+          git pull --no-rebase --no-edit origin mods
+          git push origin mods

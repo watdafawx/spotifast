@@ -83,9 +83,11 @@ Keep it that way: anything new goes in `src/mods/`, reading `App`'s public
 fields (`now_playing()`, `actions`, `dirs`) rather than adding to `App`.
 
 The `Sync upstream` workflow merges `upstream/main` daily, builds, runs the
-mods tests, and pushes. A `Cargo.lock` clash is resolved by taking
-upstream's lockfile and letting cargo add the fork's crates back; any other
-conflict opens an issue. By hand:
+mods tests, and pushes; with nothing new upstream it stops there. A
+`Cargo.lock` clash is resolved by taking upstream's lockfile and letting
+cargo add the fork's crates back; any other conflict fails the run with
+the conflicting files in its summary, and GitHub emails the owner. By
+hand:
 
 ```bash
 git fetch upstream && git merge upstream/main
