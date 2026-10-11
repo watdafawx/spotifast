@@ -279,6 +279,11 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             // page casts a shadow under the header instead.
             ui.spacing_mut().scroll.fade.strength = 0.0;
             topbar::show(app, ui);
+            // Fork: with a mod ready, open lyrics are the page, as in Spotify.
+            #[cfg(feature = "mods")]
+            if app.show_lyrics_panel && crate::mods::place(ui) {
+                return;
+            }
             let page = app.page().clone();
             let scroll = crate::autoscroll::show(
                 ui,

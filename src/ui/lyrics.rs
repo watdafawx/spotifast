@@ -34,6 +34,11 @@ fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
 }
 
 pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
+    // Fork: a mod shows lyrics as the page instead (ui::central).
+    #[cfg(feature = "mods")]
+    if crate::mods::ready() {
+        return;
+    }
     let palette = app.palette;
     let fit = super::yielding_panel(
         ui.ctx(),
@@ -122,10 +127,6 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn contents(app: &mut App, ui: &mut egui::Ui) {
-    #[cfg(feature = "mods")]
-    if crate::mods::place(ui) {
-        return;
-    }
     let palette = app.palette;
     let Some(now) = app.now_playing() else {
         widgets::empty_state(

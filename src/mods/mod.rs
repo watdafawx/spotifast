@@ -149,6 +149,9 @@ struct Host {
     has_page: bool,
     /// Where the window was last placed.
     placed: Option<Placement>,
+    /// The app's place in its page history, to notice navigation; `None`
+    /// before the first frame.
+    page: Option<(usize, usize)>,
     /// The last state written and when; `None` before the first.
     sent: Option<(Option<State>, Instant)>,
 }
@@ -184,15 +187,21 @@ pub fn attach_window(cc: &eframe::CreationContext<'_>) {
     let _ = cc;
 }
 
-/// Called by the lyrics view: when a mod can show there, reserves the rest
-/// of `ui` for it and returns true, and the view draws nothing itself.
-pub fn place(ui: &mut egui::Ui) -> bool {
-    let ready = PARENT.load(Ordering::Relaxed) != 0
+/// Whether a mod is running inside the app's window with a page to show,
+/// so it takes over the lyrics view.
+pub fn ready() -> bool {
+    PARENT.load(Ordering::Relaxed) != 0
         && matches!(
             &*HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
             Slot::Running(host) if host.has_page
-        );
-    if !ready {
+        )
+}
+
+/// Called where lyrics are shown (the page, full screen): when a mod is
+/// [`ready`], reserves the rest of `ui` for it and returns true, and the
+/// caller draws nothing there itself.
+pub fn place(ui: &mut egui::Ui) -> bool {
+    if !ready() {
         return false;
     }
     let rect = ui.available_rect_before_wrap();
@@ -249,6 +258,13 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         }
     }
     let replies: Vec<_> = host.replies.try_iter().collect();
+    // Lyrics shown as the page give way when the app goes to another page,
+    // the way any Spotify page does.
+    let page = (app.history_index, app.history.len());
+    let navigated = host.page.replace(page).is_some_and(|before| before != page);
+    if navigated && app.show_lyrics_panel && host.has_page && PARENT.load(Ordering::Relaxed) != 0 {
+        app.actions.push(Action::ToggleLyricsPanel);
+    }
     let state = app.now_playing().map(|now| State {
         saved: app.is_saved(&now.uri),
         // The same cover and colour as the player bar's tint, so it is
@@ -378,6 +394,7 @@ impl Host {
             replies,
             has_page: has_page(dir),
             placed: None,
+            page: None,
             sent: None,
         })
     }
