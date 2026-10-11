@@ -563,6 +563,9 @@ struct PlaylistCacheWrite {
 
 pub enum Command {
     OpenThemesFolder,
+    /// Fork: a Spotify request from a mod (src/mods/proxy.rs).
+    #[cfg(feature = "mods")]
+    Mods(Box<crate::mods::proxy::Request>),
     ProxyRestored {
         lease: CredentialLease,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
@@ -1888,6 +1891,11 @@ impl Worker {
                     });
                 }
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
+                #[cfg(feature = "mods")]
+                Command::Mods(request) => {
+                    let (engine, api) = (self.engine.clone(), self.api.clone());
+                    tokio::spawn(crate::mods::proxy::serve(*request, engine, api));
+                }
                 Command::Rootlist => self.fetch_rootlist(),
                 Command::RootlistFinished { generation, result } => {
                     self.on_rootlist_finished(generation, result);

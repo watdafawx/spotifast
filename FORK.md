@@ -14,9 +14,22 @@ the page's commands come back on stdout and become ordinary `Action`s. The
 browser engine never loads into the app's own process.
 
 `src/mods/shim.js` gives the page a `Spicetify` object built on that
-bridge, so Spicetify mods run unchanged as far as the shim reaches. Calls
-that need Spotify's own signed-in client (`CosmosAsync`, `GraphQL`,
-`Platform.RequestBuilder`) reject for now, so mods take their fallbacks.
+bridge, so Spicetify mods run unchanged as far as the shim reaches.
+
+Spotify requests a mod would make with Spotify's own signed-in client go
+through the app instead (`src/mods/proxy.rs`): the page names a call, the
+backend makes it with the app's grants, and only the answer comes back, so
+no token reaches a page. The calls are a fixed list:
+
+| Page asks for | Answered by |
+|---|---|
+| `CosmosAsync.get` of `spclient…/color-lyrics/v2/track/<id>` | `Engine::lyrics_json` (local playback session) |
+| `CosmosAsync.get` of `api.spotify.com/v1/me` | `ApiClient::me` |
+| `Platform.LibraryAPI.contains` | the playing song's Liked state, sent with the player state |
+| `Platform.LibraryAPI.add` / `remove` | the app's own `ToggleSaved` action |
+
+Anything else (`GraphQL`, `Platform.RequestBuilder`, other Cosmos URLs)
+rejects, so mods take their fallbacks.
 
 With no `index.html` in the mods folder, the built-in loader
 (`src/mods/loader.html`) runs the first Spicetify custom app it finds there
@@ -30,8 +43,9 @@ jsDelivr.
 
 Copy the ivLyrics folder (the one with `manifest.json`) into the mods
 folder as `mods/ivLyrics`. Lyrics, translation addons and its settings
-(toolbar → "ivLyrics config") work; the Spotify lyrics provider, Spotify
-profile and album colours don't yet, since they use Spotify's client.
+(toolbar → "ivLyrics config") work, and so do its Spotify lyrics provider
+(with local playback signed in), the Spotify profile and the like button.
+Album colours don't yet: ivLyrics reads them through `GraphQL`.
 
 - Mods folder: `mods` in the config folder (Windows: `%APPDATA%\paolino\spotifast\config\mods`)
 - Webview data: `mods-webview` in the cache folder
@@ -41,7 +55,7 @@ profile and album colours don't yet, since they use Spotify's client.
 
 Everything fork-specific lives in new files: `src/mods/`, this file and
 `.github/workflows/sync-upstream.yml`. Upstream files carry only these
-`cfg(feature = "mods")` hooks, 12 lines in all:
+`cfg(feature = "mods")` hooks, 20 lines in all:
 
 | File | Hook |
 |---|---|
@@ -49,6 +63,7 @@ Everything fork-specific lives in new files: `src/mods/`, this file and
 | `src/lib.rs` | `pub mod mods;` |
 | `src/entrypoint.rs` | `--mods-child` dispatch, next to MilkDrop's |
 | `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls` |
+| `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 
 Keep it that way: anything new goes in `src/mods/`, reading `App`'s public
 fields (`now_playing()`, `actions`, `dirs`) rather than adding to `App`.

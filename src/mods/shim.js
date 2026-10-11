@@ -3,8 +3,8 @@
 // The app sends the playing item through window.__spotifast.receive(); the
 // page sends commands with window.ipc.postMessage(). Only what mods use is
 // here, keeping Spicetify's names and shapes. Calls that need Spotify's own
-// signed-in client (CosmosAsync, GraphQL, RequestBuilder) reject for now, so
-// mods take their fallbacks.
+// signed-in client go through the app (src/mods/proxy.rs) where it can
+// answer them, and reject otherwise so mods take their fallbacks.
 (() => {
   if (window.Spicetify) return;
   const listeners = {};
@@ -12,6 +12,37 @@
   let receivedAt = 0;
 
   const send = (message) => window.ipc.postMessage(JSON.stringify(message));
+  // A Spotify request made by the app with its own grants; the page never
+  // holds a token. Answered by a {"reply": …} line with the same id.
+  const pending = new Map();
+  let nextId = 1;
+  const request = (call) =>
+    new Promise((resolve, reject) => {
+      const id = nextId++;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(Object.assign(new Error("Spotifast did not answer"), { status: 504 }));
+      }, 30000);
+      pending.set(id, { resolve, reject, timer });
+      send({ cmd: "request", id, call });
+    });
+  const settle = ({ id, ok, error, status }) => {
+    const waiting = pending.get(id);
+    if (!waiting) return;
+    pending.delete(id);
+    clearTimeout(waiting.timer);
+    if (error === undefined) waiting.resolve(ok);
+    else waiting.reject(Object.assign(new Error(error), { status }));
+  };
+  const cosmosGet = async (url) => {
+    const { hostname, pathname } = new URL(url);
+    const track = hostname === "spclient.wg.spotify.com" && pathname.match(/^\/color-lyrics\/v2\/track\/([A-Za-z0-9]+)/);
+    if (track) return request({ kind: "lyrics", uri: `spotify:track:${track[1]}` });
+    if (hostname === "api.spotify.com" && pathname === "/v1/me") return request({ kind: "me" });
+    throw Object.assign(new Error(`CosmosAsync: ${hostname}${pathname} is not available in Spotifast`), { status: 501 });
+  };
+  const urisOf = (arg) => (Array.isArray(arg) ? arg : arg?.uris ?? [arg]).map(String);
+
   const unavailable = (what) => () => Promise.reject(new Error(`${what} is not available in Spotifast`));
 
   // Page errors go to the app's log, so a broken mod can be diagnosed.
@@ -245,11 +276,16 @@
         },
       },
       UserAPI: { getUser: async () => ({ username: "", displayName: "" }) },
-      LibraryAPI: { contains: async (...uris) => uris.map(() => false), add: unavailable("LibraryAPI.add"), remove: unavailable("LibraryAPI.remove") },
+      // Liked Songs, as the app knows them; only the playing song is known here.
+      LibraryAPI: {
+        contains: async (...args) => urisOf(args.length > 1 ? args : args[0]).map((uri) => uri === state?.uri && state.saved === true),
+        add: async (arg) => urisOf(arg).forEach((uri) => send({ cmd: "set_saved", uri, saved: true })),
+        remove: async (arg) => urisOf(arg).forEach((uri) => send({ cmd: "set_saved", uri, saved: false })),
+      },
       PlaylistAPI: { add: unavailable("PlaylistAPI.add") },
       RootlistAPI: {},
     },
-    CosmosAsync: { get: unavailable("CosmosAsync"), post: unavailable("CosmosAsync"), put: unavailable("CosmosAsync"), del: unavailable("CosmosAsync") },
+    CosmosAsync: { get: cosmosGet, post: unavailable("CosmosAsync.post"), put: unavailable("CosmosAsync.put"), del: unavailable("CosmosAsync.del") },
     GraphQL: { Definitions: {}, Request: unavailable("GraphQL") },
     getAudioData: unavailable("getAudioData"),
     Locale: { getLocale: () => (navigator.language || "en").split("-")[0] },
@@ -274,6 +310,10 @@
 
   window.__spotifast = {
     receive(message) {
+      if (message.reply) {
+        settle(message.reply);
+        return;
+      }
       const before = state;
       state = message.state;
       receivedAt = performance.now();

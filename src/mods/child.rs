@@ -58,7 +58,7 @@ impl Args {
 }
 
 enum Incoming {
-    /// A line of state from the app.
+    /// A line from the app: state or a reply.
     State(String),
     /// The page loaded and wants the latest state.
     Ready,
@@ -151,15 +151,21 @@ impl ApplicationHandler<Incoming> for Mods {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Incoming) {
-        match event {
-            Incoming::State(line) => self.last = Some(line),
-            Incoming::Ready => {}
+        let line = match event {
+            // A state line is kept for a page that loads later; a reply is
+            // for the page that asked.
+            Incoming::State(line) if line.starts_with(r#"{"state""#) => {
+                self.last = Some(line);
+                self.last.clone()
+            }
+            Incoming::State(line) => Some(line),
+            Incoming::Ready => self.last.clone(),
             Incoming::Closed => {
                 event_loop.exit();
                 return;
             }
-        }
-        if let (Some(webview), Some(line)) = (&self.webview, &self.last) {
+        };
+        if let (Some(webview), Some(line)) = (&self.webview, line) {
             // The line is JSON written by the app, so it is a JS expression.
             let script = format!("window.__spotifast && window.__spotifast.receive({line})");
             let _ = webview.evaluate_script(&script);

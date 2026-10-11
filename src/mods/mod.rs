@@ -10,17 +10,19 @@
 //! [`child::Args::parse`], so merging upstream rarely touches this folder.
 
 pub mod child;
+pub mod proxy;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
 use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
+use crate::backend::Command as BackendCommand;
 use crate::model::Action;
 use crate::player::RepeatMode;
 
@@ -45,6 +47,8 @@ struct State {
     shuffle: bool,
     repeat: &'static str,
     volume_percent: u8,
+    /// In the account's Liked Songs; `None` while unknown.
+    saved: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -53,9 +57,13 @@ struct Artist {
     uri: Option<String>,
 }
 
+/// A line to the page: `{"state": …}` or `{"reply": …}`. The child keeps
+/// the latest state line for a page that loads later.
 #[derive(Serialize)]
-struct Message<'a> {
-    state: Option<&'a State>,
+#[serde(rename_all = "snake_case")]
+enum Message<'a> {
+    State(Option<&'a State>),
+    Reply(&'a proxy::Reply),
 }
 
 /// What a page may ask of the app.
@@ -73,6 +81,16 @@ enum Command {
     },
     Shuffle {
         on: bool,
+    },
+    /// Like or unlike a song.
+    SetSaved {
+        uri: String,
+        saved: bool,
+    },
+    /// A Spotify request, answered with a reply carrying the same id.
+    Request {
+        id: u64,
+        call: proxy::Call,
     },
     /// An error on the page, for the app's log.
     Log {
@@ -94,6 +112,8 @@ impl Command {
                 log::warn!("Mods page {level}: {message}");
                 return None;
             }
+            // Handled in `sync`, which can see the app and the backend.
+            Command::SetSaved { .. } | Command::Request { .. } => return None,
         })
     }
 }
@@ -102,6 +122,8 @@ struct Host {
     process: Child,
     stdin: ChildStdin,
     commands: Receiver<Command>,
+    reply_to: Sender<proxy::Reply>,
+    replies: Receiver<proxy::Reply>,
     /// The last state written and when; `None` before the first.
     sent: Option<(Option<State>, Instant)>,
 }
@@ -132,9 +154,28 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
     let Slot::Running(host) = &mut *slot else {
         return;
     };
-    app.actions
-        .extend(host.commands.try_iter().filter_map(Command::action));
+    for command in host.commands.try_iter() {
+        match command {
+            Command::Request { id, call } => {
+                app.backend
+                    .send(BackendCommand::Mods(Box::new(proxy::Request {
+                        id,
+                        call,
+                        reply: host.reply_to.clone(),
+                        wake: ctx.clone(),
+                    })))
+            }
+            Command::SetSaved { uri, saved } => {
+                if app.is_saved(&uri).unwrap_or(false) != saved {
+                    app.actions.push(Action::ToggleSaved(uri));
+                }
+            }
+            command => app.actions.extend(command.action()),
+        }
+    }
+    let replies: Vec<_> = host.replies.try_iter().collect();
     let state = app.now_playing().map(|now| State {
+        saved: app.is_saved(&now.uri),
         uri: now.uri,
         title: now.title,
         artists: now
@@ -159,7 +200,11 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         },
         volume_percent: now.volume_percent,
     });
-    if host.send(state).is_err() || host.process.try_wait().ok().flatten().is_some() {
+    let written = replies
+        .iter()
+        .try_for_each(|reply| host.write(&Message::Reply(reply)))
+        .and_then(|()| host.send(state));
+    if written.is_err() || host.process.try_wait().ok().flatten().is_some() {
         let Slot::Running(mut host) = std::mem::replace(&mut *slot, Slot::Off) else {
             unreachable!("the slot was just matched as running");
         };
@@ -188,6 +233,7 @@ impl Host {
         let stdin = process.stdin.take()?;
         let stdout = process.stdout.take()?;
         let (sender, commands) = channel();
+        let (reply_to, replies) = channel();
         std::thread::Builder::new()
             .name("mods-commands".into())
             .spawn(move || {
@@ -209,6 +255,8 @@ impl Host {
             process,
             stdin,
             commands,
+            reply_to,
+            replies,
             sent: None,
         })
     }
@@ -242,13 +290,15 @@ impl Host {
         if !due {
             return Ok(());
         }
-        let line = serde_json::to_string(&Message {
-            state: state.as_ref(),
-        })?;
-        writeln!(self.stdin, "{line}")?;
-        self.stdin.flush()?;
+        self.write(&Message::State(state.as_ref()))?;
         self.sent = Some((state, now));
         Ok(())
+    }
+
+    fn write(&mut self, message: &Message) -> std::io::Result<()> {
+        let line = serde_json::to_string(message)?;
+        writeln!(self.stdin, "{line}")?;
+        self.stdin.flush()
     }
 }
 
@@ -286,6 +336,21 @@ mod tests {
         assert_eq!(
             action(r#"{"cmd":"log","level":"error","message":"x"}"#),
             None
+        );
+        let request = serde_json::from_str::<Command>(
+            r#"{"cmd":"request","id":7,"call":{"kind":"lyrics","uri":"spotify:track:x"}}"#,
+        );
+        assert!(matches!(
+            request,
+            Ok(Command::Request {
+                id: 7,
+                call: proxy::Call::Lyrics { .. }
+            })
+        ));
+        // Only listed calls exist; a page cannot ask for anything else.
+        assert!(
+            serde_json::from_str::<Command>(r#"{"cmd":"request","id":7,"call":{"kind":"token"}}"#)
+                .is_err()
         );
     }
 }
