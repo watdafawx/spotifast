@@ -21,7 +21,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -163,8 +163,10 @@ enum Slot {
 static HOST: Mutex<Slot> = Mutex::new(Slot::NotStarted);
 /// The app's window, for the child to live in; 0 when there is none to use.
 static PARENT: AtomicIsize = AtomicIsize::new(0);
-/// The area the lyrics view reserved while drawing this frame.
-static RESERVED: Mutex<Option<Placement>> = Mutex::new(None);
+/// The area the lyrics view last reserved, and in which egui pass.
+static RESERVED: Mutex<Option<(Placement, u64)>> = Mutex::new(None);
+/// The egui pass `sync` last ran in.
+static SYNCED_PASS: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Remembers the app's window so the mods window can be put inside it.
 /// Windows only; elsewhere the mods window stays a window of its own.
@@ -198,14 +200,16 @@ pub fn place(ui: &mut egui::Ui) -> bool {
     let scale = ui.ctx().pixels_per_point();
     let min = (rect.min.to_vec2() * scale).round();
     let size = (rect.size() * scale).round();
-    *RESERVED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Placement {
+    let placement = Placement {
         x: min.x as i32,
         y: min.y as i32,
         width: size.x.max(1.0) as u32,
         height: size.y.max(1.0) as u32,
-    });
+    };
+    *RESERVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some((placement, ui.ctx().cumulative_pass_nr()));
     true
 }
 /// Once per frame: start the mods window, send it the playing item, and turn
@@ -276,11 +280,22 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         },
         volume_percent: now.volume_percent,
     });
-    // Taken every frame: a frame that drew no lyrics view hides the window.
-    let reserved = RESERVED
+    // eframe syncs twice a pass: first in `logic`, before the interface
+    // draws, then after it. Before, the last pass's reservation stands;
+    // after, only this pass's does, so a closed lyrics view hides the window
+    // at once. Hiding and showing every pass would flicker, and WebView2
+    // stops and restarts drawing each time.
+    let pass = ctx.cumulative_pass_nr();
+    let after_interface = SYNCED_PASS.swap(pass, Ordering::Relaxed) == pass;
+    let reserved = match *RESERVED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+    {
+        Some((placement, at)) if at == pass || (at + 1 == pass && !after_interface) => {
+            Some(placement)
+        }
+        _ => None,
+    };
     let written = replies
         .iter()
         .try_for_each(|reply| host.write(&Message::Reply(reply)))

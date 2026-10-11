@@ -79,6 +79,9 @@ struct Mods {
     window: Option<Window>,
     webview: Option<WebView>,
     last: Option<String>,
+    /// The newest placement not yet applied; a resize sends one a frame and
+    /// only the last of a batch is worth a WebView2 relayout.
+    pending_place: Option<Option<super::Placement>>,
 }
 
 pub fn run(args: Args) -> i32 {
@@ -107,6 +110,7 @@ pub fn run(args: Args) -> i32 {
         window: None,
         webview: None,
         last: None,
+        pending_place: None,
     };
     match event_loop.run_app(&mut mods) {
         Ok(()) => 0,
@@ -168,7 +172,13 @@ impl ApplicationHandler<Incoming> for Mods {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Incoming) {
         let line = match event {
             Incoming::State(line) if line.starts_with(r#"{"place""#) => {
-                self.place(&line);
+                #[derive(serde::Deserialize)]
+                struct Line {
+                    place: Option<super::Placement>,
+                }
+                if let Ok(Line { place }) = serde_json::from_str(&line) {
+                    self.pending_place = Some(place);
+                }
                 return;
             }
             // A state line is kept for a page that loads later; a reply is
@@ -191,6 +201,12 @@ impl ApplicationHandler<Incoming> for Mods {
         }
     }
 
+    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+        if let Some(place) = self.pending_place.take() {
+            self.place(place);
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         // A child window is the webview's whole surface; keep it filled.
         if let (WindowEvent::Resized(size), Some(webview)) = (&event, &self.webview) {
@@ -207,19 +223,15 @@ impl ApplicationHandler<Incoming> for Mods {
 
 impl Mods {
     /// Moves the window to where the app reserved room for it, or hides it.
-    fn place(&self, line: &str) {
-        #[derive(serde::Deserialize)]
-        struct Line {
-            place: Option<super::Placement>,
-        }
-        let (Ok(Line { place }), Some(window)) = (serde_json::from_str(line), &self.window) else {
-            return;
-        };
+    fn place(&self, place: Option<super::Placement>) {
+        let Some(window) = &self.window else { return };
         match place {
             Some(at) => {
                 window.set_outer_position(PhysicalPosition::new(at.x, at.y));
                 let _ = window.request_inner_size(PhysicalSize::new(at.width, at.height));
-                window.set_visible(true);
+                if window.is_visible() != Some(true) {
+                    window.set_visible(true);
+                }
             }
             None => window.set_visible(false),
         }
