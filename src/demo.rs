@@ -1259,6 +1259,55 @@ mod tests {
         (ctx, app)
     }
 
+    /// Collapsed, the Library is a strip of covers named for screen readers
+    /// and on hover, with the way back; open, its icon collapses it (#298).
+    #[test]
+    fn the_collapsed_library_is_a_strip_of_named_covers() {
+        let frame = |app: &mut App, ctx: &egui::Context| {
+            let mut last = None;
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280.0, 800.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| app.frame_ui(ui),
+                );
+                output.textures_delta.clear();
+                last = Some(output);
+            }
+            last.unwrap().platform_output.accesskit_update.unwrap()
+        };
+        let bounds = |tree: &egui::accesskit::TreeUpdate, label: &str| {
+            tree.nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(label))
+                .and_then(|(_, node)| node.bounds())
+        };
+
+        let (ctx, mut app) = accessible_app("library-collapsed");
+        app.settings.sidebar_collapsed = true;
+        let tree = frame(&mut app, &ctx);
+        assert!(bounds(&tree, "Expand Your Library").is_some());
+        let liked = bounds(&tree, "Liked Songs").expect("the Liked Songs cover");
+        assert!(
+            liked.x1 <= f64::from(crate::ui::sidebar::COLLAPSED_WIDTH),
+            "the cover stays in the strip, ending at {}",
+            liked.x1
+        );
+        assert!(bounds(&tree, "Search Your Library").is_none());
+        app.backend.shutdown();
+
+        let (ctx, mut app) = accessible_app("library-open");
+        let tree = frame(&mut app, &ctx);
+        assert!(bounds(&tree, "Collapse Your Library").is_some());
+        assert!(bounds(&tree, "Expand Your Library").is_none());
+        app.backend.shutdown();
+    }
+
     /// #576: the Library heading never runs under the header's buttons. It
     /// shrinks a little for a long translation and gives way entirely in
     /// the narrowest sidebar, but stays where there is room.

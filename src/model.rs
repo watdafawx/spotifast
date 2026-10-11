@@ -1114,6 +1114,8 @@ pub enum Action {
         sort: crate::settings::LibrarySort,
     },
     SetLibraryGrid(bool),
+    /// Collapse the Library to a strip of covers, or open it again.
+    SetLibraryCollapsed(bool),
     ToggleLibraryFolder(String),
     ArrangeLibrary {
         pinned: Vec<String>,

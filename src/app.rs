@@ -9077,6 +9077,10 @@ impl App {
                 self.settings.sidebar_grid = grid;
                 self.mark_settings_dirty();
             }
+            Action::SetLibraryCollapsed(collapsed) => {
+                self.settings.sidebar_collapsed = collapsed;
+                self.mark_settings_dirty();
+            }
             Action::ToggleLibraryFolder(id) => {
                 if self.collapsed_folders.contains(&id) {
                     self.collapsed_folders.retain(|held| held != &id);
