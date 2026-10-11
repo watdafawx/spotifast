@@ -274,6 +274,8 @@ pub struct Settings {
     pub sidebar_compact: bool,
     /// Show the Library as responsive cover cards instead of rows.
     pub sidebar_grid: bool,
+    /// The Library collapsed to a strip of covers, names on hover (#298).
+    pub sidebar_collapsed: bool,
     pub sidebar_width: f32,
     pub lyrics_width: f32,
     pub queue_width: f32,
@@ -437,6 +439,7 @@ impl Default for Settings {
             art_expanded: false,
             sidebar_compact: false,
             sidebar_grid: false,
+            sidebar_collapsed: false,
             sidebar_width: 250.0,
             lyrics_width: 360.0,
             queue_width: 360.0,
@@ -1165,6 +1168,20 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let restored: Settings = serde_json::from_str(&json).unwrap();
         assert!(restored.sidebar_grid);
+    }
+
+    #[test]
+    fn collapsed_library_round_trips_and_older_settings_keep_it_open() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.sidebar_collapsed);
+
+        let settings = Settings {
+            sidebar_collapsed: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert!(restored.sidebar_collapsed);
     }
 
     #[test]
