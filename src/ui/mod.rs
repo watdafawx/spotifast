@@ -275,9 +275,18 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     0.85
                 };
-                let top = blend(palette.window, tint, strength);
                 let header = Rect::from_min_size(rect.min, vec2(rect.width(), 340.0));
-                widgets::paint_vertical_gradient(ui, header, top, palette.window);
+                if palette.window.a() < 255 {
+                    // Fork: over a see-through page the header is a wash of
+                    // the tint that fades out. Fading to the page's own colour
+                    // would stack a second translucent layer on the page and
+                    // leave a seam where the header ends.
+                    let wash = tint.gamma_multiply(strength);
+                    widgets::paint_vertical_gradient(ui, header, wash, egui::Color32::TRANSPARENT);
+                } else {
+                    let top = blend(palette.window, tint, strength);
+                    widgets::paint_vertical_gradient(ui, header, top, palette.window);
+                }
             }
             ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
             // egui fades a scrolled page's edge into the panel's plain
