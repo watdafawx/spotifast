@@ -27,9 +27,10 @@ no token reaches a page. The calls are a fixed list:
 | `CosmosAsync.get` of `api.spotify.com/v1/me` | `ApiClient::me` |
 | `Platform.LibraryAPI.contains` | the playing song's Liked state, sent with the player state |
 | `Platform.LibraryAPI.add` / `remove` | the app's own `ToggleSaved` action |
+| `GraphQL.Request` of `fetchExtractedColorForTrackEntity` / `getDynamicColorsByUris` for the playing song | the cover colour Spotifast tints with (`App::tint_for`), sent with the player state |
 
-Anything else (`GraphQL`, `Platform.RequestBuilder`, other Cosmos URLs)
-rejects, so mods take their fallbacks.
+Anything else (other `GraphQL` queries, `Platform.RequestBuilder`, other
+Cosmos URLs) rejects, so mods take their fallbacks.
 
 With no `index.html` in the mods folder, the built-in loader
 (`src/mods/loader.html`) runs the first Spicetify custom app it finds there
@@ -44,8 +45,9 @@ jsDelivr.
 Copy the ivLyrics folder (the one with `manifest.json`) into the mods
 folder as `mods/ivLyrics`. Lyrics, translation addons and its settings
 (toolbar → "ivLyrics config") work, and so do its Spotify lyrics provider
-(with local playback signed in), the Spotify profile and the like button.
-Album colours don't yet: ivLyrics reads them through `GraphQL`.
+(with local playback signed in), the Spotify profile, the like button and
+album colours. Demo mode (`--demo`) shows no album colours: the app drops
+backend events there, cover colours included.
 
 - Mods folder: `mods` in the config folder (Windows: `%APPDATA%\paolino\spotifast\config\mods`)
 - Webview data: `mods-webview` in the cache folder

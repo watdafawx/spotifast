@@ -49,6 +49,9 @@ struct State {
     volume_percent: u8,
     /// In the account's Liked Songs; `None` while unknown.
     saved: Option<bool>,
+    /// The cover's colour as `#rrggbb`, the one Spotifast tints with;
+    /// `None` until it has been worked out.
+    color: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -176,6 +179,11 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
     let replies: Vec<_> = host.replies.try_iter().collect();
     let state = app.now_playing().map(|now| State {
         saved: app.is_saved(&now.uri),
+        // The same cover and colour as the player bar's tint, so it is
+        // usually worked out already.
+        color: app
+            .tint_for(now.art_small.as_deref().or(now.art_url.as_deref()))
+            .map(|color| format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())),
         uri: now.uri,
         title: now.title,
         artists: now

@@ -41,6 +41,61 @@
     if (hostname === "api.spotify.com" && pathname === "/v1/me") return request({ kind: "me" });
     throw Object.assign(new Error(`CosmosAsync: ${hostname}${pathname} is not available in Spotifast`), { status: 501 });
   };
+  // Album colours come from the cover colour the app sends with the state,
+  // shaped like the GraphQL answers Spotify's client gives.
+  const colorWaiters = new Set();
+  const coverColor = (isCurrent) =>
+    new Promise((resolve, reject) => {
+      const fail = () => reject(Object.assign(new Error("No cover colour for that item"), { status: 404 }));
+      if (!isCurrent) return fail();
+      if (state.color) return resolve(state.color);
+      const uri = state.uri;
+      const done = () => {
+        clearTimeout(timer);
+        colorWaiters.delete(waiter);
+      };
+      const waiter = (now) => {
+        if (now?.uri !== uri) {
+          done();
+          fail();
+        } else if (now.color) {
+          done();
+          resolve(now.color);
+        }
+      };
+      const timer = setTimeout(() => {
+        done();
+        fail();
+      }, 5000);
+      colorWaiters.add(waiter);
+    });
+  const rgba = (hex, scale) => {
+    const n = Number.parseInt(hex.slice(1), 16);
+    const channel = (shift) => (((n >> shift) & 255) / 255) * scale;
+    return { red: channel(16), green: channel(8), blue: channel(0), alpha: 1 };
+  };
+  const GraphQL = {
+    Definitions: {
+      fetchExtractedColorForTrackEntity: { name: "fetchExtractedColorForTrackEntity" },
+      getDynamicColorsByUris: { name: "getDynamicColorsByUris" },
+    },
+    async Request(definition, variables = {}) {
+      switch (definition?.name) {
+        case "fetchExtractedColorForTrackEntity": {
+          const hex = await coverColor(variables.uri === state?.uri);
+          const extractedColors = { colorDark: { hex }, colorLight: { hex }, colorRaw: { hex } };
+          return { data: { trackUnion: { albumOfTrack: { coverArt: { extractedColors } } } } };
+        }
+        case "getDynamicColorsByUris": {
+          const hex = await coverColor(variables.imageUris?.[0] === state?.art_url);
+          // Darker steps for higher contrast, as ivLyrics' own fallback does.
+          const at = (scale) => ({ backgroundBase: rgba(hex, scale) });
+          return { data: { getDynamicColorsByUris: [{ minContrast: at(1), highContrast: at(0.72), higherContrast: at(0.48) }] } };
+        }
+      }
+      throw Object.assign(new Error(`GraphQL ${definition?.name} is not available in Spotifast`), { status: 501 });
+    },
+  };
   const urisOf = (arg) => (Array.isArray(arg) ? arg : arg?.uris ?? [arg]).map(String);
 
   const unavailable = (what) => () => Promise.reject(new Error(`${what} is not available in Spotifast`));
@@ -286,7 +341,7 @@
       RootlistAPI: {},
     },
     CosmosAsync: { get: cosmosGet, post: unavailable("CosmosAsync.post"), put: unavailable("CosmosAsync.put"), del: unavailable("CosmosAsync.del") },
-    GraphQL: { Definitions: {}, Request: unavailable("GraphQL") },
+    GraphQL,
     getAudioData: unavailable("getAudioData"),
     Locale: { getLocale: () => (navigator.language || "en").split("-")[0] },
     Config: { version: "2.40.0", current_theme: "", color_scheme: "", username: "" },
@@ -318,6 +373,7 @@
       state = message.state;
       receivedAt = performance.now();
       Player.data = playerData(state);
+      colorWaiters.forEach((waiter) => waiter(state));
       if (before?.uri !== state?.uri) emit("songchange", Player.data);
       if (before?.playing !== state?.playing) emit("onplaypause", Player.data);
     },
