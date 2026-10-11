@@ -225,7 +225,18 @@ pub fn attach_window(cc: &eframe::CreationContext<'_>) {
         if let Ok(handle) = cc.window_handle()
             && let RawWindowHandle::Win32(window) = handle.as_raw()
         {
-            PARENT.store(window.hwnd.get(), Ordering::Relaxed);
+            let parent = window.hwnd.get();
+            // Closing to the tray destroys the app's window, and the mods
+            // window inside it; reopening makes a new one. Start the mods
+            // window again inside that.
+            if PARENT.swap(parent, Ordering::Relaxed) != parent {
+                let mut slot = HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Slot::Running(host) = &mut *slot {
+                    let _ = host.process.kill();
+                    let _ = host.process.wait();
+                }
+                *slot = Slot::NotStarted;
+            }
         }
     }
     #[cfg(not(windows))]

@@ -231,7 +231,8 @@ impl ApplicationHandler<Incoming> for Mods {
                 size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
             });
         }
-        if let WindowEvent::CloseRequested = event {
+        // Closed, or destroyed with the app's window it lived in.
+        if let WindowEvent::CloseRequested | WindowEvent::Destroyed = event {
             event_loop.exit();
         }
     }
