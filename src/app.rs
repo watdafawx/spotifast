@@ -2021,6 +2021,12 @@ impl App {
                 },
                 Event::UpdateChecked { manual, result } => {
                     self.update_checking = false;
+                    // A repository with no release yet (the fork, before its
+                    // first one) answers 404: there is nothing newer to install.
+                    let result = match result {
+                        Err(error) if error.to_string().ends_with("answered 404") => Ok(None),
+                        result => result,
+                    };
                     match result {
                         Ok(Some(notice)) => {
                             if manual || self.update.as_ref() != Some(&notice) {
