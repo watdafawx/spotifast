@@ -274,6 +274,46 @@ pub fn can_restore(pos: [f32; 2], pixels_per_point: f32) -> bool {
     .contains(anchor)
 }
 
+/// Fork: puts Windows 11's acrylic blur behind the main window, which is
+/// created see-through on Windows. An opaque palette paints every pixel, so
+/// the blur shows only where a theme's colours have alpha (a glass theme).
+/// Windows before 11 22H2 ignores the request and shows the desktop unblurred.
+#[cfg(windows)]
+pub fn frosted_backdrop(hwnd: isize) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::UI::Controls::MARGINS;
+
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    let dark: i32 = 1;
+    let backdrop = DWMSBT_TRANSIENTWINDOW;
+    // The whole client area is the backdrop's, not only a frame strip.
+    let margins = MARGINS {
+        cxLeftWidth: -1,
+        cxRightWidth: -1,
+        cyTopHeight: -1,
+        cyBottomHeight: -1,
+    };
+    unsafe {
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
+        // Dark acrylic; the themes that use it are dark.
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&raw const dark).cast(),
+            size_of::<i32>() as u32,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            (&raw const backdrop).cast(),
+            size_of_val(&backdrop) as u32,
+        );
+    }
+}
+
 /// The main window's smallest size with no side panel open. The page and
 /// its top bar fit beside the narrowest sidebar from here.
 pub const MAIN_MIN_SIZE: [f32; 2] = [760.0, 520.0];

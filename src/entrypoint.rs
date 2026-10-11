@@ -560,6 +560,8 @@ pub(crate) fn run() -> eframe::Result<()> {
         #[cfg(feature = "demo")]
         let creator_shot = shot.clone();
         let mini = lease.peek(MiniWindow::wanted);
+        #[cfg(windows)]
+        let winamp_window = mini.is_some();
         #[cfg(all(windows, target_arch = "aarch64"))]
         let locale = lease.peek(|app| app.locale);
         #[cfg(feature = "demo")]
@@ -638,6 +640,15 @@ pub(crate) fn run() -> eframe::Result<()> {
                 app.attach(&cc.egui_ctx);
                 #[cfg(feature = "mods")]
                 spotifast::mods::attach_window(cc);
+                #[cfg(windows)]
+                if !winamp_window {
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    if let Ok(handle) = cc.window_handle()
+                        && let RawWindowHandle::Win32(window) = handle.as_raw()
+                    {
+                        spotifast::window::frosted_backdrop(window.hwnd.get());
+                    }
+                }
                 #[cfg(windows)]
                 let thumbbar = {
                     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -830,6 +841,12 @@ fn native_options(
                 .with_fullscreen(fullscreen);
             if inner_size.is_some() {
                 viewport = viewport.with_max_inner_size(size);
+            }
+            // Fork: see-through for glass themes, over the acrylic blur
+            // window::frosted_backdrop asks for.
+            #[cfg(windows)]
+            {
+                viewport = viewport.with_transparent(true);
             }
             viewport
         }
@@ -1339,7 +1356,8 @@ impl eframe::App for Shell {
     /// The mini player's window is see-through where the skin leaves it
     /// out; the big window paints itself over eframe's own ground.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        if self.app.settings.winamp_window {
+        // Fork: on Windows the big window is see-through too (glass themes).
+        if self.app.settings.winamp_window || cfg!(windows) {
             [0.0; 4]
         } else {
             egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()

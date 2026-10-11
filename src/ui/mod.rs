@@ -670,12 +670,13 @@ fn resize_direction(
 }
 
 pub fn blend(base: Color32, tint: Color32, amount: f32) -> Color32 {
-    let a = egui::Rgba::from(base);
+    let a = egui::Rgba::from(base.to_opaque());
     let b = egui::Rgba::from(tint);
     let mixed = a * (1.0 - amount) + b * amount;
-    let mut color = Color32::from(mixed);
-    color[3] = 255;
-    color
+    let [r, g, b, _] = Color32::from(mixed).to_array();
+    // Fork: keeps the base's see-through, so a glass theme's tinted header
+    // stays glass. An opaque base gives an opaque colour, as before.
+    Color32::from_rgba_unmultiplied(r, g, b, base.a())
 }
 
 fn toasts(app: &mut App, ctx: &egui::Context, bottom_offset: f32) {
@@ -861,6 +862,20 @@ mod window_chrome_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tinted glass header stays glass; an opaque one stays opaque.
+    #[test]
+    fn blend_keeps_the_base_alpha() {
+        let tint = Color32::from_rgb(200, 40, 40);
+        let opaque = Color32::from_rgb(10, 20, 30);
+        assert_eq!(blend(opaque, tint, 0.5).a(), 255);
+        let glass = Color32::from_rgba_unmultiplied(10, 20, 30, 128);
+        let mixed = blend(glass, tint, 0.5);
+        assert_eq!(mixed.a(), 128);
+        let [r, g, b, _] = mixed.to_srgba_unmultiplied();
+        let [or, og, ob, _] = blend(opaque, tint, 0.5).to_array();
+        assert!(r.abs_diff(or) <= 2 && g.abs_diff(og) <= 2 && b.abs_diff(ob) <= 2);
+    }
 
     /// The header casts a shadow only on a page scrolled under it, and it
     /// is black in both themes, never the page's own colour.
