@@ -312,6 +312,55 @@ pub fn frosted_backdrop(hwnd: isize) {
             size_of_val(&backdrop) as u32,
         );
     }
+    if custom_titlebar() {
+        hide_caption_buttons(hwnd);
+    }
+}
+
+/// Fork: with Spotifast's own title bar, Windows must not draw its caption
+/// buttons in the frame `frosted_backdrop` extends over the window. They need
+/// `WS_SYSMENU`, which winit keeps on undecorated windows (with `WS_CAPTION`,
+/// for Aero Snap) and sets again whenever the window's state changes, so a
+/// subclass keeps it off. Snap, resizing and the taskbar use other styles.
+#[cfg(windows)]
+fn hide_caption_buttons(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongPtrW, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGING, WS_SYSMENU,
+    };
+
+    unsafe extern "system" fn keep_off(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _: usize,
+        _: usize,
+    ) -> LRESULT {
+        if message == WM_STYLECHANGING && wparam as i32 == GWL_STYLE {
+            // SAFETY: for WM_STYLECHANGING, lparam points at the new styles.
+            unsafe { (*(lparam as *mut STYLESTRUCT)).styleNew &= !WS_SYSMENU };
+        }
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    // SAFETY: hwnd is the app's live main window, on its own thread.
+    unsafe {
+        SetWindowSubclass(hwnd, Some(keep_off), 1, 0);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_SYSMENU as isize));
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// The main window's smallest size with no side panel open. The page and
