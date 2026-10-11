@@ -22,6 +22,9 @@ pub enum Call {
     Lyrics { uri: String },
     /// The signed-in account's profile, as `GET /v1/me` returns it.
     Me,
+    /// A track's ISRC from Spotify's own metadata, which mods use to match
+    /// recordings (ivLyrics' video backgrounds). Needs local playback.
+    Isrc { uri: String },
 }
 
 pub struct Request {
@@ -49,6 +52,7 @@ pub async fn serve(request: Request, engine: Option<Arc<Engine>>, api: Arc<ApiGa
     let result = match request.call {
         Call::Lyrics { uri } => lyrics(engine, &uri).await,
         Call::Me => me(&api).await,
+        Call::Isrc { uri } => isrc(engine, &uri).await,
     };
     let (ok, error, status) = match result {
         Ok(value) => (Some(value), None, None),
@@ -78,6 +82,24 @@ async fn lyrics(engine: Option<Arc<Engine>>, uri: &str) -> Answer {
         Ok(None) => Err((404, "Spotify has no lyrics for this track".into())),
         Err(error) => Err((502, format!("{error:#}"))),
     }
+}
+
+async fn isrc(engine: Option<Arc<Engine>>, uri: &str) -> Answer {
+    use librespot_metadata::{Metadata as _, Track};
+    if !uri.starts_with("spotify:track:") {
+        return Err((400, "not a track".into()));
+    }
+    let id = librespot_core::SpotifyUri::from_uri(uri).map_err(|error| (400, error.to_string()))?;
+    let engine = engine.ok_or((401, "local playback is not signed in".to_string()))?;
+    let track = Track::get(engine.session(), &id)
+        .await
+        .map_err(|error| (502, error.to_string()))?;
+    track
+        .external_ids
+        .iter()
+        .find(|external| external.external_type.eq_ignore_ascii_case("isrc"))
+        .map(|external| serde_json::Value::String(external.id.clone()))
+        .ok_or((404, "Spotify has no ISRC for this track".into()))
 }
 
 async fn me(api: &ApiGateway) -> Answer {
@@ -120,6 +142,12 @@ mod tests {
                 },
             ),
             (3, Call::Me),
+            (
+                4,
+                Call::Isrc {
+                    uri: "spotify:track:0VjIjW4GlUZAMYd2vXMi3b".into(),
+                },
+            ),
         ] {
             let request = Request {
                 id,
@@ -138,6 +166,14 @@ mod tests {
             .try_iter()
             .map(|reply| (reply.id, reply.status))
             .collect();
-        assert_eq!(statuses, [(1, Some(401)), (2, Some(400)), (3, Some(401))]);
+        assert_eq!(
+            statuses,
+            [
+                (1, Some(401)),
+                (2, Some(400)),
+                (3, Some(401)),
+                (4, Some(401))
+            ]
+        );
     }
 }

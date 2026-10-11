@@ -33,12 +33,14 @@ no token reaches a page. The calls are a fixed list:
 |---|---|
 | `CosmosAsync.get` of `spclient…/color-lyrics/v2/track/<id>` | `Engine::lyrics_json` (local playback session) |
 | `CosmosAsync.get` of `api.spotify.com/v1/me` | `ApiClient::me` |
+| `Platform.RequestBuilder` of `spclient…/metadata/4/track/<gid>` | the track's ISRC from librespot's metadata, as `{isrc}` (ivLyrics' video backgrounds) |
+| `Platform.RequestBuilder` of the lyrics or `/v1/me` URLs above | the same as through `CosmosAsync.get` |
 | `Platform.LibraryAPI.contains` | the playing song's Liked state, sent with the player state |
 | `Platform.LibraryAPI.add` / `remove` | the app's own `ToggleSaved` action |
 | `GraphQL.Request` of `fetchExtractedColorForTrackEntity` / `getDynamicColorsByUris` for the playing song | the cover colour Spotifast tints with (`App::tint_for`), sent with the player state |
 
-Anything else (other `GraphQL` queries, `Platform.RequestBuilder`, other
-Cosmos URLs) rejects, so mods take their fallbacks.
+Anything else (other `GraphQL` queries, other Spotify URLs) rejects, or
+answers 501 through `RequestBuilder`, so mods take their fallbacks.
 
 With no `index.html` in the mods folder, the built-in loader
 (`src/mods/loader.html`) runs the first Spicetify custom app it finds there

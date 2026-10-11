@@ -34,12 +34,59 @@
     if (error === undefined) waiting.resolve(ok);
     else waiting.reject(Object.assign(new Error(error), { status }));
   };
-  const cosmosGet = async (url) => {
+  // A track's 128-bit gid, as hex, in Spotify's 22-character base62.
+  const BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const gidToBase62 = (hex) => {
+    let n = BigInt(`0x${hex}`);
+    let id = "";
+    for (let i = 0; i < 22; i++) {
+      id = BASE62[Number(n % 62n)] + id;
+      n /= 62n;
+    }
+    return id;
+  };
+  // The Spotify URLs the app answers, for CosmosAsync and RequestBuilder
+  // alike; anything else is not available.
+  const spotifyCall = (url) => {
     const { hostname, pathname } = new URL(url);
-    const track = hostname === "spclient.wg.spotify.com" && pathname.match(/^\/color-lyrics\/v2\/track\/([A-Za-z0-9]+)/);
-    if (track) return request({ kind: "lyrics", uri: `spotify:track:${track[1]}` });
-    if (hostname === "api.spotify.com" && pathname === "/v1/me") return request({ kind: "me" });
-    throw Object.assign(new Error(`CosmosAsync: ${hostname}${pathname} is not available in Spotifast`), { status: 501 });
+    if (hostname === "spclient.wg.spotify.com") {
+      const lyrics = pathname.match(/^\/color-lyrics\/v2\/track\/([A-Za-z0-9]+)/);
+      if (lyrics) return { call: { kind: "lyrics", uri: `spotify:track:${lyrics[1]}` } };
+      const metadata = pathname.match(/^\/metadata\/4\/track\/([0-9a-fA-F]{32})$/);
+      if (metadata) {
+        return { call: { kind: "isrc", uri: `spotify:track:${gidToBase62(metadata[1])}` }, shape: (isrc) => ({ isrc }) };
+      }
+    }
+    if (hostname === "api.spotify.com" && pathname === "/v1/me") return { call: { kind: "me" } };
+    throw Object.assign(new Error(`${hostname}${pathname} is not available in Spotifast`), { status: 501 });
+  };
+  const spotifyGet = async (url) => {
+    const { call, shape } = spotifyCall(url);
+    const answer = await request(call);
+    return shape ? shape(answer) : answer;
+  };
+  const cosmosGet = spotifyGet;
+  // Platform.RequestBuilder: build().withHost().withPath()….send(), which
+  // answers with a status rather than throwing, as Spotify's does.
+  const RequestBuilder = {
+    build() {
+      const target = { host: "", path: "", query: {} };
+      const builder = {
+        withHost: (host) => ((target.host = host), builder),
+        withPath: (path) => ((target.path = path), builder),
+        withEndpointIdentifier: () => builder,
+        withQueryParameters: (query) => (Object.assign(target.query, query), builder),
+        withoutMarket: () => builder,
+        async send() {
+          try {
+            return { status: 200, body: await spotifyGet(target.host + target.path) };
+          } catch (error) {
+            return { status: error.status || 502, body: null };
+          }
+        },
+      };
+      return builder;
+    },
   };
   // Album colours come from the cover colour the app sends with the state,
   // shaped like the GraphQL answers Spotify's client gives.
@@ -339,6 +386,7 @@
       },
       PlaylistAPI: { add: unavailable("PlaylistAPI.add") },
       RootlistAPI: {},
+      RequestBuilder,
     },
     CosmosAsync: { get: cosmosGet, post: unavailable("CosmosAsync.post"), put: unavailable("CosmosAsync.put"), del: unavailable("CosmosAsync.del") },
     GraphQL,
