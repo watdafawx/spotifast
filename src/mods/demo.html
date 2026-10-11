@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Spotifast mods</title>
+<style>
+  :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #121212; color: #eee; }
+  main { width: min(420px, 90vw); text-align: center; }
+  img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: #282828; }
+  h1 { font-size: 1.4rem; margin: 16px 0 4px; }
+  p { margin: 0; color: #aaa; }
+  #bar { height: 6px; margin: 20px 0 6px; background: #3e3e3e; border-radius: 3px; cursor: pointer; }
+  #fill { height: 100%; width: 0; background: #1ed760; border-radius: 3px; }
+  #time { display: flex; justify-content: space-between; font-size: .8rem; color: #aaa; }
+  button { margin: 12px 6px; padding: 8px 16px; border: 0; border-radius: 20px; background: #eee; color: #121212; font-size: 1rem; cursor: pointer; }
+  small { display: block; margin-top: 16px; color: #666; }
+</style>
+</head>
+<body>
+<main>
+  <img id="art" alt="">
+  <h1 id="title">Nothing playing</h1>
+  <p id="artist"></p>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="time"><span id="pos">0:00</span><span id="dur">0:00</span></div>
+  <button id="back">⏮</button><button id="play">⏯</button><button id="next">⏭</button>
+  <small>Built-in demo. Put an index.html in the mods folder to replace it.</small>
+</main>
+<script>
+  const P = Spicetify.Player;
+  const $ = (id) => document.getElementById(id);
+  const clock = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+  const render = () => {
+    const meta = P.data?.item.metadata;
+    $("title").textContent = meta?.title ?? "Nothing playing";
+    $("artist").textContent = meta?.artist_name ?? "";
+    $("art").src = meta?.image_url ?? "";
+    $("play").textContent = P.isPlaying() ? "⏸" : "▶";
+  };
+  const tick = () => {
+    $("fill").style.width = `${P.getProgressPercent() * 100}%`;
+    $("pos").textContent = clock(P.getProgress());
+    $("dur").textContent = clock(P.getDuration());
+  };
+  P.addEventListener("songchange", render);
+  P.addEventListener("onplaypause", () => { render(); tick(); });
+  P.addEventListener("onprogress", tick);
+  $("back").onclick = () => P.back();
+  $("play").onclick = () => P.togglePlay();
+  $("next").onclick = () => P.next();
+  $("bar").onclick = (e) => P.seek(e.offsetX / e.currentTarget.clientWidth);
+</script>
+</body>
+</html>

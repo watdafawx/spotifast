@@ -349,6 +349,10 @@ pub(crate) fn run() -> eframe::Result<()> {
     if let Some(args) = spotifast::milkdrop::child::Args::parse() {
         std::process::exit(spotifast::milkdrop::child::run(args));
     }
+    #[cfg(feature = "mods")]
+    if let Some(args) = spotifast::mods::child::Args::parse() {
+        std::process::exit(spotifast::mods::child::run(args));
+    }
 
     let cli = Cli::from_arg_matches(&Cli::command().get_matches_from(&launch.arguments))
         .unwrap_or_else(|error| error.exit());

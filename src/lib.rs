@@ -31,6 +31,8 @@ pub mod mac_notch;
 pub mod mac_touchbar_crash_guard;
 pub mod milkdrop;
 pub mod model;
+#[cfg(feature = "mods")]
+pub mod mods;
 pub mod notch;
 pub mod opener;
 pub mod paths;

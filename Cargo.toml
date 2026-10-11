@@ -106,6 +106,8 @@ projectm-sys = { version = "1.2.2", default-features = false, features = ["stati
 winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }
 glutin-winit = { version = "0.5", optional = true }
+# Fork: the mods window's webview (WebView2 on Windows), in its own process.
+wry = { version = "0.57", default-features = false, optional = true }
 # Detect the live window backend, including when MilkDrop is disabled.
 # eframe already compiles this crate.
 raw-window-handle = "0.6"
@@ -214,6 +216,8 @@ demo = []
 # binary at compile time, so building needs cmake, a C++ compiler, and
 # libclang. `--no-default-features` leaves it out.
 milkdrop = ["dep:projectm-sys", "dep:winit", "dep:glutin", "dep:glutin-winit"]
+# Fork: Spicetify-style mods in a webview child process (src/mods).
+mods = ["dep:winit", "dep:wry"]
 
 [profile.release]
 lto = "thin"

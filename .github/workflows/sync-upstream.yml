@@ -1,0 +1,65 @@
+# Fork only: merge crmne/spotifast into the mods branch every day.
+# A clean merge that builds is pushed; anything else opens an issue.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: mods
+          fetch-depth: 0
+
+      - name: Merge upstream
+        id: merge
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/crmne/spotifast
+          git fetch upstream main
+          if git merge --no-edit upstream/main; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(git diff --name-only --diff-filter=U)" = "Cargo.lock" ]; then
+            # Only the lockfile clashed: take upstream's and let cargo add
+            # back the fork's crates (wry and what it pulls in).
+            git checkout --theirs Cargo.lock
+            cargo metadata --features mods --format-version 1 > /dev/null
+            git add Cargo.lock
+            git commit --no-edit
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > conflicts.txt
+            git merge --abort
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and test
+        if: steps.merge.outputs.ok == 'true'
+        run: |
+          cargo build --no-default-features --features mods
+          cargo test --no-default-features --features mods --lib mods::
+
+      - name: Push
+        if: steps.merge.outputs.ok == 'true'
+        run: git push origin mods
+
+      - name: Report conflicts
+        if: steps.merge.outputs.ok == 'false' || failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="Merging upstream/main into mods needs a hand. Run: git fetch upstream && git merge upstream/main"
+          [ -f conflicts.txt ] && body="$body"$'\n\nConflicts:\n'"$(cat conflicts.txt)"
+          gh issue create --title "Upstream sync failed ($(date -u +%F))" --body "$body"

@@ -3490,6 +3490,8 @@ impl App {
     }
 
     fn sync_media_controls(&mut self, ctx: &egui::Context) {
+        #[cfg(feature = "mods")]
+        crate::mods::sync(self, ctx);
         let art_file = self
             .now_playing()
             .and_then(|now| now.art_url)
