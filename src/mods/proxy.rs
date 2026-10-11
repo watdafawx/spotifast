@@ -45,13 +45,17 @@ pub struct Reply {
 }
 
 pub async fn serve(request: Request, engine: Option<Arc<Engine>>, api: Arc<ApiGateway>) {
+    log::info!("Mods: {:?}", request.call);
     let result = match request.call {
         Call::Lyrics { uri } => lyrics(engine, &uri).await,
         Call::Me => me(&api).await,
     };
     let (ok, error, status) = match result {
         Ok(value) => (Some(value), None, None),
-        Err((status, error)) => (None, Some(error), Some(status)),
+        Err((status, error)) => {
+            log::info!("Mods: answered {status}: {error}");
+            (None, Some(error), Some(status))
+        }
     };
     let _ = request.reply.send(Reply {
         id: request.id,

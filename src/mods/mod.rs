@@ -6,8 +6,13 @@
 //! per line; the child writes commands from the page to its stdout the same
 //! way. `shim.js` turns both into the `Spicetify` API that mods expect.
 //!
-//! Everything here is fork code. Upstream files only call [`sync`] and
-//! [`child::Args::parse`], so merging upstream rarely touches this folder.
+//! On Windows the mods window is a child of the app's window, shown where
+//! the lyrics view would be: the lyrics view calls [`place`] to reserve its
+//! area, and [`sync`] tells the child where that is, or to hide.
+//!
+//! Everything here is fork code. Upstream files only call [`sync`],
+//! [`place`], [`attach_window`] and [`child::Args::parse`], so merging
+//! upstream rarely touches this folder.
 
 pub mod child;
 pub mod proxy;
@@ -16,6 +21,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -67,6 +73,18 @@ struct Artist {
 enum Message<'a> {
     State(Option<&'a State>),
     Reply(&'a proxy::Reply),
+    /// Where the child's window goes in the app's window, or `None` to hide
+    /// it. Handled by the child, not the page.
+    Place(Option<Placement>),
+}
+
+/// A rectangle in the app window's client area, in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// What a page may ask of the app.
@@ -127,6 +145,10 @@ struct Host {
     commands: Receiver<Command>,
     reply_to: Sender<proxy::Reply>,
     replies: Receiver<proxy::Reply>,
+    /// The mods folder holds a page to show, so the lyrics view hands over.
+    has_page: bool,
+    /// Where the window was last placed.
+    placed: Option<Placement>,
     /// The last state written and when; `None` before the first.
     sent: Option<(Option<State>, Instant)>,
 }
@@ -139,7 +161,53 @@ enum Slot {
 }
 
 static HOST: Mutex<Slot> = Mutex::new(Slot::NotStarted);
+/// The app's window, for the child to live in; 0 when there is none to use.
+static PARENT: AtomicIsize = AtomicIsize::new(0);
+/// The area the lyrics view reserved while drawing this frame.
+static RESERVED: Mutex<Option<Placement>> = Mutex::new(None);
 
+/// Remembers the app's window so the mods window can be put inside it.
+/// Windows only; elsewhere the mods window stays a window of its own.
+pub fn attach_window(cc: &eframe::CreationContext<'_>) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = cc.window_handle()
+            && let RawWindowHandle::Win32(window) = handle.as_raw()
+        {
+            PARENT.store(window.hwnd.get(), Ordering::Relaxed);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = cc;
+}
+
+/// Called by the lyrics view: when a mod can show there, reserves the rest
+/// of `ui` for it and returns true, and the view draws nothing itself.
+pub fn place(ui: &mut egui::Ui) -> bool {
+    let ready = PARENT.load(Ordering::Relaxed) != 0
+        && matches!(
+            &*HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Slot::Running(host) if host.has_page
+        );
+    if !ready {
+        return false;
+    }
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, egui::Sense::hover());
+    let scale = ui.ctx().pixels_per_point();
+    let min = (rect.min.to_vec2() * scale).round();
+    let size = (rect.size() * scale).round();
+    *RESERVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Placement {
+        x: min.x as i32,
+        y: min.y as i32,
+        width: size.x.max(1.0) as u32,
+        height: size.y.max(1.0) as u32,
+    });
+    true
+}
 /// Once per frame: start the mods window, send it the playing item, and turn
 /// its commands into actions.
 pub fn sync(app: &mut App, ctx: &egui::Context) {
@@ -208,9 +276,21 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         },
         volume_percent: now.volume_percent,
     });
+    // Taken every frame: a frame that drew no lyrics view hides the window.
+    let reserved = RESERVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
     let written = replies
         .iter()
         .try_for_each(|reply| host.write(&Message::Reply(reply)))
+        .and_then(|()| {
+            if reserved == host.placed {
+                return Ok(());
+            }
+            host.placed = reserved;
+            host.write(&Message::Place(reserved))
+        })
         .and_then(|()| host.send(state));
     if written.is_err() || host.process.try_wait().ok().flatten().is_some() {
         let Slot::Running(mut host) = std::mem::replace(&mut *slot, Slot::Off) else {
@@ -221,12 +301,23 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// An `index.html`, or a folder with a Spicetify `manifest.json`.
+fn has_page(dir: &Path) -> bool {
+    dir.join("index.html").is_file()
+        || std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.path().join("manifest.json").is_file())
+}
+
 impl Host {
     fn start(dir: &Path, data: &Path, ctx: egui::Context) -> Option<Self> {
         let exe = std::env::current_exe()
             .inspect_err(|error| log::warn!("Mods: could not find the program to run: {error}"))
             .ok()?;
-        let mut process = Process::new(exe)
+        let mut process = Process::new(exe);
+        process
             .arg("--mods-child")
             .arg("--mods-dir")
             .arg(dir)
@@ -234,7 +325,12 @@ impl Host {
             .arg(data)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let parent = PARENT.load(Ordering::Relaxed);
+        if parent != 0 {
+            process.arg("--mods-parent").arg(parent.to_string());
+        }
+        let mut process = process
             .spawn()
             .inspect_err(|error| log::warn!("Mods: could not start the window: {error}"))
             .ok()?;
@@ -265,6 +361,8 @@ impl Host {
             commands,
             reply_to,
             replies,
+            has_page: has_page(dir),
+            placed: None,
             sent: None,
         })
     }

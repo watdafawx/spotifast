@@ -122,6 +122,10 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn contents(app: &mut App, ui: &mut egui::Ui) {
+    #[cfg(feature = "mods")]
+    if crate::mods::place(ui) {
+        return;
+    }
     let palette = app.palette;
     let Some(now) = app.now_playing() else {
         widgets::empty_state(
@@ -292,6 +296,17 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
             let rect = ui.max_rect();
             background(app, ui, rect);
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
+            // Fork: a mod's lyrics below the header, which keeps the way out.
+            #[cfg(feature = "mods")]
+            {
+                let region = rect.shrink2(vec2(24.0, 0.0)).with_min_y(rect.top() + top);
+                let mut content = ui.new_child(UiBuilder::new().max_rect(region));
+                fullscreen_header(app, &mut content);
+                content.add_space(12.0);
+                if crate::mods::place(&mut content) {
+                    return;
+                }
+            }
             if app.now_playing().is_some() && rect.width() >= COVER_BESIDE_MIN_WIDTH {
                 with_cover(app, ui, rect, top);
                 return;

@@ -12,9 +12,10 @@ use std::io::{BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
 use winit::window::{Window, WindowId};
 use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
 use wry::{WebContext, WebView, WebViewBuilder};
@@ -33,6 +34,8 @@ const START_URL: &str = "mods://localhost/index.html";
 pub struct Args {
     dir: PathBuf,
     data: PathBuf,
+    /// The app's window (an HWND), to live inside instead of on our own.
+    parent: Option<isize>,
 }
 
 impl Args {
@@ -42,17 +45,20 @@ impl Args {
         }
         let mut dir = None;
         let mut data = None;
+        let mut parent = None;
         let mut all = std::env::args().skip(1);
         while let Some(arg) = all.next() {
             match arg.as_str() {
                 "--mods-dir" => dir = all.next().map(PathBuf::from),
                 "--mods-data" => data = all.next().map(PathBuf::from),
+                "--mods-parent" => parent = all.next().and_then(|hwnd| hwnd.parse().ok()),
                 _ => {}
             }
         }
         Some(Self {
             dir: dir?,
             data: data?,
+            parent,
         })
     }
 }
@@ -116,9 +122,18 @@ impl ApplicationHandler<Incoming> for Mods {
         if self.window.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title("Spotifast mods")
             .with_inner_size(LogicalSize::new(960.0, 720.0));
+        // Inside the app's window: no frame, hidden until the app says where.
+        if let Some(parent) = self.args.parent.and_then(std::num::NonZeroIsize::new) {
+            let parent = RawWindowHandle::Win32(Win32WindowHandle::new(parent));
+            // SAFETY: the app passed its own live top-level window, and it
+            // outlives this process: closing it closes our stdin, and we exit.
+            attributes = unsafe { attributes.with_parent_window(Some(parent)) }
+                .with_decorations(false)
+                .with_visible(false);
+        }
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
             Err(error) => {
@@ -152,6 +167,10 @@ impl ApplicationHandler<Incoming> for Mods {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Incoming) {
         let line = match event {
+            Incoming::State(line) if line.starts_with(r#"{"place""#) => {
+                self.place(&line);
+                return;
+            }
             // A state line is kept for a page that loads later; a reply is
             // for the page that asked.
             Incoming::State(line) if line.starts_with(r#"{"state""#) => {
@@ -173,8 +192,36 @@ impl ApplicationHandler<Incoming> for Mods {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        // A child window is the webview's whole surface; keep it filled.
+        if let (WindowEvent::Resized(size), Some(webview)) = (&event, &self.webview) {
+            let _ = webview.set_bounds(wry::Rect {
+                position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+            });
+        }
         if let WindowEvent::CloseRequested = event {
             event_loop.exit();
+        }
+    }
+}
+
+impl Mods {
+    /// Moves the window to where the app reserved room for it, or hides it.
+    fn place(&self, line: &str) {
+        #[derive(serde::Deserialize)]
+        struct Line {
+            place: Option<super::Placement>,
+        }
+        let (Ok(Line { place }), Some(window)) = (serde_json::from_str(line), &self.window) else {
+            return;
+        };
+        match place {
+            Some(at) => {
+                window.set_outer_position(PhysicalPosition::new(at.x, at.y));
+                let _ = window.request_inner_size(PhysicalSize::new(at.width, at.height));
+                window.set_visible(true);
+            }
+            None => window.set_visible(false),
         }
     }
 }

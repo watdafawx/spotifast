@@ -7,9 +7,14 @@ lives here and follows upstream daily.
 ## How it works
 
 Built with `--features mods`, the app starts itself again with
-`--mods-child`. That process opens a window with a webview (WebView2 on
-Windows) and loads `index.html` from the mods folder, or a built-in demo
-page. The app writes the playing item to the child's stdin as JSON lines;
+`--mods-child`. That process opens a webview (WebView2 on Windows) and
+loads `index.html` from the mods folder, or a built-in loader. On Windows
+its window is a child of the app's window and takes over the lyrics view:
+the lyrics side panel and full-screen lyrics show the mod instead of
+Spotifast's own lyrics. The app tells the child where that area is each
+time it changes and hides it when no lyrics view is open. If the child
+fails, Spotifast's own lyrics come back. Elsewhere it is a window of its
+own. The app writes the playing item to the child's stdin as JSON lines;
 the page's commands come back on stdout and become ordinary `Action`s. The
 browser engine never loads into the app's own process.
 
@@ -57,13 +62,14 @@ backend events there, cover colours included.
 
 Everything fork-specific lives in new files: `src/mods/`, this file and
 `.github/workflows/sync-upstream.yml`. Upstream files carry only these
-`cfg(feature = "mods")` hooks, 20 lines in all:
+`cfg(feature = "mods")` hooks:
 
 | File | Hook |
 |---|---|
 | `Cargo.toml` | `mods` feature, `wry` dependency |
 | `src/lib.rs` | `pub mod mods;` |
-| `src/entrypoint.rs` | `--mods-child` dispatch, next to MilkDrop's |
+| `src/entrypoint.rs` | `--mods-child` dispatch, next to MilkDrop's; `mods::attach_window(cc)` after the app attaches |
+| `src/ui/lyrics.rs` | `mods::place(ui)` at the top of the side panel's contents, and in full screen below the header |
 | `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls` |
 | `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 

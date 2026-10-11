@@ -636,6 +636,8 @@ pub(crate) fn run() -> eframe::Result<()> {
                     }
                 }
                 app.attach(&cc.egui_ctx);
+                #[cfg(feature = "mods")]
+                spotifast::mods::attach_window(cc);
                 #[cfg(windows)]
                 let thumbbar = {
                     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
