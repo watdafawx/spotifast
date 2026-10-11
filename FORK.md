@@ -87,6 +87,16 @@ Everything fork-specific lives in new files: `src/mods/`, this file and
 | `src/updates.rs` | builds with mods update from `watdafawx/spotifast` releases |
 | `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 
+One fork change is not behind the feature: **glass themes on Windows**.
+The main window is created see-through with Windows 11's acrylic blur
+behind it (`window::frosted_backdrop`, called from `entrypoint.rs`;
+`windows-sys` gains `Win32_Graphics_Dwm` and `Win32_UI_Controls`). Opaque
+themes paint every pixel and look as before; themes whose colours have
+alpha (`contrib/themes/*Glass*.json`, `Frost`, `Smoked Acrylic`) show the
+blurred desktop. `ui/mod.rs` keeps a tinted header see-through for them
+(`blend` keeps the base's alpha; the page header fades to transparent).
+These touch upstream code directly, so expect them in merge conflicts.
+
 Keep it that way: anything new goes in `src/mods/`, reading `App`'s public
 fields (`now_playing()`, `actions`, `dirs`) rather than adding to `App`.
 
