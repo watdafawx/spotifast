@@ -12,6 +12,13 @@ pub use fastframe_update::{
 };
 use fastframe_update::{MacConfig, ReqwestTransport, UpdateConfig};
 
+/// Fork: builds with mods update from the fork's releases, so an update
+/// never swaps them for an upstream build without mods.
+#[cfg(feature = "mods")]
+const REPOSITORY: &str = "watdafawx/spotifast";
+#[cfg(not(feature = "mods"))]
+const REPOSITORY: &str = "crmne/spotifast";
+
 pub const CONFIG: UpdateConfig = UpdateConfig {
     macos: MacConfig {
         bundle_ids: &["rocks.spotifast.Spotifast"],
@@ -23,7 +30,7 @@ pub const CONFIG: UpdateConfig = UpdateConfig {
     // carry the key: from then on an unsigned release is refused.
     publisher_key: None,
     ..UpdateConfig::new(
-        "crmne/spotifast",
+        REPOSITORY,
         "Spotifast",
         "spotifast",
         env!("CARGO_PKG_VERSION"),

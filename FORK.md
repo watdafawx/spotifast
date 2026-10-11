@@ -74,6 +74,7 @@ Everything fork-specific lives in new files: `src/mods/`, this file and
 | `src/ui/lyrics.rs` | `mods::ready()` skips the side panel; `mods::place(ui)` in full screen below the header |
 | `src/ui/mod.rs` | `mods::place(ui)` in `central` after the top bar while lyrics are open |
 | `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls`; `Action::Back` closes mod lyrics shown as the page |
+| `src/updates.rs` | builds with mods update from `watdafawx/spotifast` releases |
 | `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 
 Keep it that way: anything new goes in `src/mods/`, reading `App`'s public
