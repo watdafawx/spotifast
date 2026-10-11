@@ -23,6 +23,9 @@ use wry::{WebContext, WebView, WebViewBuilder};
 const SHIM: &str = include_str!("shim.js");
 const LOADER: &str = include_str!("loader.html");
 const DEMO: &str = include_str!("demo.html");
+/// Settings for the page's storage, carried over from another client (such
+/// as Spotify with Spicetify): applied by the loader once, then deleted.
+const IMPORT_FILE: &str = "localstorage-import.json";
 /// Libraries the loader gives mods, served from the binary (see
 /// `vendor/README.md`), so nothing needs a CDN.
 const VENDOR: &[(&str, &[u8])] = &[
@@ -84,6 +87,8 @@ enum Incoming {
     State(String),
     /// The page loaded and wants the latest state.
     Ready,
+    /// The loader applied `localstorage-import.json`; it is not needed again.
+    Imported,
     /// The app closed our stdin.
     Closed,
 }
@@ -205,6 +210,10 @@ impl ApplicationHandler<Incoming> for Mods {
             }
             Incoming::State(line) => Some(line),
             Incoming::Ready => self.last.clone(),
+            Incoming::Imported => {
+                let _ = std::fs::remove_file(self.args.dir.join(IMPORT_FILE));
+                return;
+            }
             Incoming::Closed => {
                 event_loop.exit();
                 return;
@@ -271,6 +280,10 @@ fn forward(body: &str, proxy: &EventLoopProxy<Incoming>) {
     };
     if message["cmd"] == "ready" {
         let _ = proxy.send_event(Incoming::Ready);
+        return;
+    }
+    if message["cmd"] == "imported" {
+        let _ = proxy.send_event(Incoming::Imported);
         return;
     }
     let mut stdout = std::io::stdout().lock();

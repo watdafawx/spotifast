@@ -60,7 +60,13 @@ album colours. Demo mode (`--demo`) shows no album colours: the app drops
 backend events there, cover colours included.
 
 - Mods folder: `mods` in the config folder (Windows: `%APPDATA%\paolino\spotifast\config\mods`)
-- Webview data: `mods-webview` in the cache folder
+- Webview data, including the mods' settings: `mods-webview` in the data
+  folder (Windows: `%LOCALAPPDATA%\paolino\spotifast\data\mods-webview`);
+  one in the cache folder from an older build moves there once
+- Carrying settings over: put `localstorage-import.json` (`{"key": "value"}`)
+  in the mods folder; the loader writes it into the page's storage before
+  the app starts, then deletes it. For ivLyrics this brings what its own
+  Export leaves out, such as AI and lyrics providers.
 - Devtools: right-click → Inspect in the mods window
 
 ## Keeping up with upstream

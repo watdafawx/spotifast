@@ -282,11 +282,17 @@ pub fn place(ui: &mut egui::Ui) -> bool {
 pub fn sync(app: &mut App, ctx: &egui::Context) {
     let mut slot = HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if matches!(*slot, Slot::NotStarted) {
-        *slot = match Host::start(
-            &app.dirs.config.join("mods"),
-            &app.dirs.cache.join("mods-webview"),
-            ctx.clone(),
-        ) {
+        // The webview's storage holds the mods' settings, so it lives with
+        // the app's data, not in the cache; an older copy moves over once.
+        let data = app.dirs.state.join("mods-webview");
+        let old = app.dirs.cache.join("mods-webview");
+        if !data.exists()
+            && old.exists()
+            && let Err(error) = std::fs::rename(&old, &data)
+        {
+            log::warn!("Mods: could not move the webview's data: {error}");
+        }
+        *slot = match Host::start(&app.dirs.config.join("mods"), &data, ctx.clone()) {
             Some(host) => Slot::Running(Box::new(host)),
             None => Slot::Off,
         };

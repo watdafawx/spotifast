@@ -72,6 +72,18 @@
   style.textContent = await text("style.css").catch(() => "");
   document.head.append(style);
 
+  // Settings carried over from another client (FORK.md), applied once,
+  // before the app reads any; the app then deletes the file.
+  const carried = await fetch("/localstorage-import.json")
+    .then((response) => (response.ok ? response.json() : null))
+    .catch(() => null);
+  if (carried) {
+    for (const [key, value] of Object.entries(carried)) {
+      localStorage.setItem(key, String(value));
+    }
+    window.ipc.postMessage(JSON.stringify({ cmd: "imported" }));
+  }
+
   Spicetify.Platform.History.location.pathname = `/${name}`;
   for (const file of manifest.subfiles_extension || []) {
     run(await text(file), file);
