@@ -44,8 +44,8 @@ With no `index.html` in the mods folder, the built-in loader
 (or `?app=<name>`) the way Spicetify does: `subfiles_extension` as global
 scripts, then `index.js` and `subfiles` in one function whose `render` is
 the app's component. Buttons a mod adds to Spotify's menus or playbar show
-in a toolbar at the top right. React 18.3.1 and Mousetrap come from
-jsDelivr.
+in a toolbar at the top right. React 18.3.1 and Mousetrap 1.6.5 are
+served from the binary (`src/mods/vendor/`), so the loader needs no CDN.
 
 ### ivLyrics
 
@@ -73,7 +73,7 @@ Everything fork-specific lives in new files: `src/mods/`, this file and
 | `src/entrypoint.rs` | `--mods-child` dispatch, next to MilkDrop's; `mods::attach_window(cc)` after the app attaches |
 | `src/ui/lyrics.rs` | `mods::ready()` skips the side panel; `mods::place(ui)` in full screen below the header |
 | `src/ui/mod.rs` | `mods::place(ui)` in `central` after the top bar while lyrics are open |
-| `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls` |
+| `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls`; `Action::Back` closes mod lyrics shown as the page |
 | `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 
 Keep it that way: anything new goes in `src/mods/`, reading `App`'s public

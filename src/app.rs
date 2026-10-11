@@ -8297,6 +8297,12 @@ impl App {
                 self.actions.push(Action::ShowWindow);
             }
             Action::Back => {
+                // Fork: lyrics shown as the page close like a page of their own.
+                #[cfg(feature = "mods")]
+                if self.show_lyrics_panel && crate::mods::ready() {
+                    self.show_lyrics_panel = false;
+                    return;
+                }
                 if self.can_go_back() {
                     self.history_index -= 1;
                     let page = self.page().clone();

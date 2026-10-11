@@ -23,6 +23,22 @@ use wry::{WebContext, WebView, WebViewBuilder};
 const SHIM: &str = include_str!("shim.js");
 const LOADER: &str = include_str!("loader.html");
 const DEMO: &str = include_str!("demo.html");
+/// Libraries the loader gives mods, served from the binary (see
+/// `vendor/README.md`), so nothing needs a CDN.
+const VENDOR: &[(&str, &[u8])] = &[
+    (
+        "vendor/react.production.min.js",
+        include_bytes!("vendor/react.production.min.js"),
+    ),
+    (
+        "vendor/react-dom.production.min.js",
+        include_bytes!("vendor/react-dom.production.min.js"),
+    ),
+    (
+        "vendor/mousetrap.min.js",
+        include_bytes!("vendor/mousetrap.min.js"),
+    ),
+];
 
 /// Where a page served by the `mods` scheme lives. WebView2 and Android
 /// reach custom schemes through `https://<scheme>.localhost`.
@@ -263,6 +279,12 @@ fn serve(dir: &Path, request: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>>
         .all(|part| matches!(part, Component::Normal(_)))
     {
         return status(StatusCode::FORBIDDEN);
+    }
+    if let Some((_, body)) = VENDOR.iter().find(|(name, _)| *name == path) {
+        return Response::builder()
+            .header(CONTENT_TYPE, "text/javascript; charset=utf-8")
+            .body(Cow::Borrowed(*body))
+            .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR));
     }
     let body = match std::fs::read(dir.join(relative)) {
         Ok(body) => Cow::Owned(body),
