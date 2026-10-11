@@ -34,11 +34,6 @@ fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
 }
 
 pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
-    // Fork: a mod shows lyrics as the page instead (ui::central).
-    #[cfg(feature = "mods")]
-    if crate::mods::ready() {
-        return;
-    }
     let palette = app.palette;
     let fit = super::yielding_panel(
         ui.ctx(),
@@ -297,9 +292,10 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
             let rect = ui.max_rect();
             background(app, ui, rect);
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
-            // Fork: a mod's lyrics below the header, which keeps the way out.
+            // Fork: with the mod's page open, full screen shows the mod,
+            // below the header, which keeps the way out.
             #[cfg(feature = "mods")]
-            {
+            if crate::mods::page_open() {
                 let region = rect.shrink2(vec2(24.0, 0.0)).with_min_y(rect.top() + top);
                 let mut content = ui.new_child(UiBuilder::new().max_rect(region));
                 fullscreen_header(app, &mut content);

@@ -9,11 +9,12 @@ lives here and follows upstream daily.
 Built with `--features mods`, the app starts itself again with
 `--mods-child`. That process opens a webview (WebView2 on Windows) and
 loads `index.html` from the mods folder, or a built-in loader. On Windows
-its window is a child of the app's window and takes over the lyrics view:
-the lyrics button opens the mod as the page (below the top bar, as
-ivLyrics looks in Spotify) instead of the lyrics side panel, and
-full-screen lyrics show it below the header. Going to another page closes
-it. The app tells the child where that area is each
+its window is a child of the app's window, shown as a page of its own: a
+button beside Lyrics in the player bar (sparkles, named after the mod)
+opens it below the top bar, as ivLyrics looks in Spotify. Spotifast's own
+lyrics panel stays on its Lyrics button. With the mod's page open,
+full-screen lyrics show the mod below the header. Back, or going to
+another page, closes it. The app tells the child where that area is each
 time it changes and hides it when no lyrics view is open. If the child
 fails, Spotifast's own lyrics come back. Elsewhere it is a window of its
 own. The app writes the playing item to the child's stdin as JSON lines;
@@ -71,9 +72,10 @@ Everything fork-specific lives in new files: `src/mods/`, this file and
 | `Cargo.toml` | `mods` feature, `wry` dependency |
 | `src/lib.rs` | `pub mod mods;` |
 | `src/entrypoint.rs` | `--mods-child` dispatch, next to MilkDrop's; `mods::attach_window(cc)` after the app attaches |
-| `src/ui/lyrics.rs` | `mods::ready()` skips the side panel; `mods::place(ui)` in full screen below the header |
-| `src/ui/mod.rs` | `mods::place(ui)` in `central` after the top bar while lyrics are open |
-| `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls`; `Action::Back` closes mod lyrics shown as the page |
+| `src/ui/lyrics.rs` | `mods::place(ui)` in full screen below the header while the mod's page is open |
+| `src/ui/mod.rs` | `mods::place(ui)` in `central` after the top bar while the mod's page is open |
+| `src/ui/player_bar.rs` | `mods::page_button` beside the Lyrics button |
+| `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls`; `Action::Back` closes the mod's page |
 | `src/updates.rs` | builds with mods update from `watdafawx/spotifast` releases |
 | `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 

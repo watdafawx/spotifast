@@ -933,6 +933,9 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>) {
     {
         app.actions.push(Action::ToggleLyricsPanel);
     }
+    // Fork: the mod's page, beside Spotifast's own lyrics.
+    #[cfg(feature = "mods")]
+    crate::mods::page_button(app, ui);
 }
 
 #[cfg(test)]

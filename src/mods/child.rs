@@ -104,7 +104,7 @@ pub fn run(args: Args) -> i32 {
     let event_loop = match EventLoop::<Incoming>::with_user_event().build() {
         Ok(event_loop) => event_loop,
         Err(error) => {
-            eprintln!("mods: no event loop: {error}");
+            report(&format!("no event loop: {error}"));
             return 1;
         }
     };
@@ -131,7 +131,7 @@ pub fn run(args: Args) -> i32 {
     match event_loop.run_app(&mut mods) {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("mods: {error}");
+            report(&format!("{error}"));
             1
         }
     }
@@ -157,7 +157,7 @@ impl ApplicationHandler<Incoming> for Mods {
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
             Err(error) => {
-                eprintln!("mods: no window: {error}");
+                report(&format!("no window: {error}"));
                 event_loop.exit();
                 return;
             }
@@ -177,7 +177,7 @@ impl ApplicationHandler<Incoming> for Mods {
         match built {
             Ok(webview) => self.webview = Some(webview),
             Err(error) => {
-                eprintln!("mods: no webview: {error}");
+                report(&format!("no webview: {error}"));
                 event_loop.exit();
                 return;
             }
@@ -252,6 +252,14 @@ impl Mods {
             None => window.set_visible(false),
         }
     }
+}
+
+/// Tells the app's log about a failure here; a GUI build has no stderr.
+fn report(message: &str) {
+    let line = serde_json::json!({ "cmd": "log", "level": "error", "message": message });
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 /// Passes a page's message on to the app as one compact JSON line; answers

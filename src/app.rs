@@ -8297,10 +8297,9 @@ impl App {
                 self.actions.push(Action::ShowWindow);
             }
             Action::Back => {
-                // Fork: lyrics shown as the page close like a page of their own.
+                // Fork: the mod's page closes like a page of its own.
                 #[cfg(feature = "mods")]
-                if self.show_lyrics_panel && crate::mods::ready() {
-                    self.show_lyrics_panel = false;
+                if crate::mods::close_page() {
                     return;
                 }
                 if self.can_go_back() {

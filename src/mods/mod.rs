@@ -6,13 +6,15 @@
 //! per line; the child writes commands from the page to its stdout the same
 //! way. `shim.js` turns both into the `Spicetify` API that mods expect.
 //!
-//! On Windows the mods window is a child of the app's window, shown where
-//! the lyrics view would be: the lyrics view calls [`place`] to reserve its
-//! area, and [`sync`] tells the child where that is, or to hide.
+//! On Windows the mods window is a child of the app's window, shown as a
+//! page of its own: a player-bar button ([`page_button`]) opens it, the page
+//! area calls [`place`] to reserve room for it, and [`sync`] tells the child
+//! where that is, or to hide.
 //!
 //! Everything here is fork code. Upstream files only call [`sync`],
-//! [`place`], [`attach_window`] and [`child::Args::parse`], so merging
-//! upstream rarely touches this folder.
+//! [`place`], [`page_open`], [`close_page`], [`page_button`],
+//! [`attach_window`] and [`child::Args::parse`], so merging upstream rarely
+//! touches this folder.
 
 pub mod child;
 pub mod proxy;
@@ -21,7 +23,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -130,7 +132,7 @@ impl Command {
             Command::Volume { percent } => Action::SetVolume(percent.min(100)),
             Command::Shuffle { on } => Action::SetShuffle(on),
             Command::Log { level, message } => {
-                log::warn!("Mods page {level}: {message}");
+                log::warn!("Mods {level}: {message}");
                 return None;
             }
             // Handled in `sync`, which can see the app and the backend.
@@ -145,8 +147,10 @@ struct Host {
     commands: Receiver<Command>,
     reply_to: Sender<proxy::Reply>,
     replies: Receiver<proxy::Reply>,
-    /// The mods folder holds a page to show, so the lyrics view hands over.
+    /// The mods folder holds a page to show.
     has_page: bool,
+    /// What the page is called: the first custom app's manifest name.
+    name: String,
     /// Where the window was last placed.
     placed: Option<Placement>,
     /// The app's place in its page history, to notice navigation; `None`
@@ -170,6 +174,47 @@ static PARENT: AtomicIsize = AtomicIsize::new(0);
 static RESERVED: Mutex<Option<(Placement, u64)>> = Mutex::new(None);
 /// The egui pass `sync` last ran in.
 static SYNCED_PASS: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The mod's page is open in place of the app's page.
+static PAGE_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the mod's page is open (and a mod is ready to show it).
+pub fn page_open() -> bool {
+    PAGE_OPEN.load(Ordering::Relaxed) && ready()
+}
+
+/// Closes the mod's page; true when it was open, so Back stops there.
+pub fn close_page() -> bool {
+    PAGE_OPEN.swap(false, Ordering::Relaxed) && ready()
+}
+
+/// The player-bar button that opens and closes the mod's page, named after
+/// the mod. Nothing when no mod is ready.
+pub fn page_button(app: &App, ui: &mut egui::Ui) {
+    let name = match &*HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
+        Slot::Running(host) if host.has_page && PARENT.load(Ordering::Relaxed) != 0 => {
+            host.name.clone()
+        }
+        _ => return,
+    };
+    let open = PAGE_OPEN.load(Ordering::Relaxed);
+    let palette = app.palette;
+    if crate::theme::icon_button(
+        ui,
+        crate::theme::Icon::Sparkles,
+        18.0,
+        if open {
+            palette.accent
+        } else {
+            palette.secondary
+        },
+        palette.text,
+        &name,
+    )
+    .clicked()
+    {
+        PAGE_OPEN.store(!open, Ordering::Relaxed);
+    }
+}
 
 /// Remembers the app's window so the mods window can be put inside it.
 /// Windows only; elsewhere the mods window stays a window of its own.
@@ -258,12 +303,11 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         }
     }
     let replies: Vec<_> = host.replies.try_iter().collect();
-    // Lyrics shown as the page give way when the app goes to another page,
-    // the way any Spotify page does.
+    // The mod's page gives way when the app goes to another page, the way
+    // any Spotify page does.
     let page = (app.history_index, app.history.len());
-    let navigated = host.page.replace(page).is_some_and(|before| before != page);
-    if navigated && app.show_lyrics_panel && host.has_page && PARENT.load(Ordering::Relaxed) != 0 {
-        app.actions.push(Action::ToggleLyricsPanel);
+    if host.page.replace(page).is_some_and(|before| before != page) {
+        PAGE_OPEN.store(false, Ordering::Relaxed);
     }
     let state = app.now_playing().map(|now| State {
         saved: app.is_saved(&now.uri),
@@ -332,6 +376,24 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// The first Spicetify custom app's name, for the button that opens it.
+fn page_name(dir: &Path) -> String {
+    let mut manifests: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("manifest.json"))
+        .filter(|path| path.is_file())
+        .collect();
+    manifests.sort();
+    manifests
+        .first()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|manifest| manifest["name"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "Mods".to_string())
+}
+
 /// An `index.html`, or a folder with a Spicetify `manifest.json`.
 fn has_page(dir: &Path) -> bool {
     dir.join("index.html").is_file()
@@ -393,6 +455,7 @@ impl Host {
             reply_to,
             replies,
             has_page: has_page(dir),
+            name: page_name(dir),
             placed: None,
             page: None,
             sent: None,
