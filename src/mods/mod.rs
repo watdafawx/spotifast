@@ -147,12 +147,10 @@ struct Host {
     commands: Receiver<Command>,
     reply_to: Sender<proxy::Reply>,
     replies: Receiver<proxy::Reply>,
-    /// The mods folder holds a page to show.
-    has_page: bool,
-    /// What the page is called: the first custom app's manifest name.
-    name: String,
     /// Where the window was last placed.
     placed: Option<Placement>,
+    /// Since when nothing has shown the window; `None` while it is shown.
+    hidden_since: Option<Instant>,
     /// The app's place in its page history, to notice navigation; `None`
     /// before the first frame.
     page: Option<(usize, usize)>,
@@ -161,6 +159,8 @@ struct Host {
 }
 
 enum Slot {
+    /// Not running: before the page is first shown, or after it has been
+    /// hidden for [`IDLE_STOP`]. Started again when it is shown.
     NotStarted,
     Running(Box<Host>),
     /// The window was closed or never opened; stay off until the next launch.
@@ -176,6 +176,23 @@ static RESERVED: Mutex<Option<(Placement, u64)>> = Mutex::new(None);
 static SYNCED_PASS: AtomicU64 = AtomicU64::new(u64::MAX);
 /// The mod's page is open in place of the app's page.
 static PAGE_OPEN: AtomicBool = AtomicBool::new(false);
+/// The mod's name when the mods folder holds a page to show; read once.
+static MOD_NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+/// How long the mods window may stay hidden before it is stopped, freeing
+/// its webview's memory (about a gigabyte with ivLyrics). Showing it again
+/// starts it afresh, in a few seconds.
+const IDLE_STOP: Duration = Duration::from_secs(30);
+
+/// A mod can show inside the app's window: there is a page, a window to put
+/// it in, and it has not failed this launch. It need not be running yet.
+fn available() -> bool {
+    PARENT.load(Ordering::Relaxed) != 0
+        && matches!(MOD_NAME.get(), Some(Some(_)))
+        && !matches!(
+            *HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Slot::Off
+        )
+}
 
 /// Whether the mod's page is open (and a mod is ready to show it).
 pub fn page_open() -> bool {
@@ -190,11 +207,11 @@ pub fn close_page() -> bool {
 /// The player-bar button that opens and closes the mod's page, named after
 /// the mod. Nothing when no mod is ready.
 pub fn page_button(app: &App, ui: &mut egui::Ui) {
-    let name = match &*HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
-        Slot::Running(host) if host.has_page && PARENT.load(Ordering::Relaxed) != 0 => {
-            host.name.clone()
-        }
-        _ => return,
+    if !available() {
+        return;
+    }
+    let Some(Some(name)) = MOD_NAME.get() else {
+        return;
     };
     let open = PAGE_OPEN.load(Ordering::Relaxed);
     let palette = app.palette;
@@ -208,7 +225,7 @@ pub fn page_button(app: &App, ui: &mut egui::Ui) {
             palette.secondary
         },
         palette.text,
-        &name,
+        name,
     )
     .clicked()
     {
@@ -243,14 +260,10 @@ pub fn attach_window(cc: &eframe::CreationContext<'_>) {
     let _ = cc;
 }
 
-/// Whether a mod is running inside the app's window with a page to show,
-/// so it takes over the lyrics view.
+/// Whether a mod can show inside the app's window, so it takes over the
+/// lyrics view; it starts when it is first placed there.
 pub fn ready() -> bool {
-    PARENT.load(Ordering::Relaxed) != 0
-        && matches!(
-            &*HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
-            Slot::Running(host) if host.has_page
-        )
+    available()
 }
 
 /// Called where lyrics are shown (the page, full screen): when a mod is
@@ -280,8 +293,22 @@ pub fn place(ui: &mut egui::Ui) -> bool {
 /// Once per frame: start the mods window, send it the playing item, and turn
 /// its commands into actions.
 pub fn sync(app: &mut App, ctx: &egui::Context) {
+    let mods = app.dirs.config.join("mods");
+    MOD_NAME.get_or_init(|| has_page(&mods).then(|| page_name(&mods)));
+    let reserved = reserved(ctx);
     let mut slot = HOST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if matches!(*slot, Slot::NotStarted) {
+    if let Slot::Running(host) = &mut *slot {
+        if reserved.is_some() {
+            host.hidden_since = None;
+        } else if host.hidden_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_STOP {
+            let Slot::Running(host) = std::mem::replace(&mut *slot, Slot::NotStarted) else {
+                unreachable!("the slot was just matched as running");
+            };
+            host.stop();
+            return;
+        }
+    }
+    if matches!(*slot, Slot::NotStarted) && reserved.is_some() {
         // The webview's storage holds the mods' settings, so it lives with
         // the app's data, not in the cache; an older copy moves over once.
         let data = app.dirs.state.join("mods-webview");
@@ -357,22 +384,6 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
         },
         volume_percent: now.volume_percent,
     });
-    // eframe syncs twice a pass: first in `logic`, before the interface
-    // draws, then after it. Before, the last pass's reservation stands;
-    // after, only this pass's does, so a closed lyrics view hides the window
-    // at once. Hiding and showing every pass would flicker, and WebView2
-    // stops and restarts drawing each time.
-    let pass = ctx.cumulative_pass_nr();
-    let after_interface = SYNCED_PASS.swap(pass, Ordering::Relaxed) == pass;
-    let reserved = match *RESERVED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-    {
-        Some((placement, at)) if at == pass || (at + 1 == pass && !after_interface) => {
-            Some(placement)
-        }
-        _ => None,
-    };
     let written = replies
         .iter()
         .try_for_each(|reply| host.write(&Message::Reply(reply)))
@@ -421,7 +432,51 @@ fn has_page(dir: &Path) -> bool {
             .any(|entry| entry.path().join("manifest.json").is_file())
 }
 
+/// Where the lyrics view wants the mods window this pass, if anywhere.
+///
+/// eframe syncs twice a pass: first in `logic`, before the interface draws,
+/// then after it. Before, the last pass's reservation stands; after, only
+/// this pass's does, so a closed lyrics view hides the window at once.
+/// Hiding and showing every pass would flicker, and WebView2 stops and
+/// restarts drawing each time.
+fn reserved(ctx: &egui::Context) -> Option<Placement> {
+    let pass = ctx.cumulative_pass_nr();
+    let after_interface = SYNCED_PASS.swap(pass, Ordering::Relaxed) == pass;
+    match *RESERVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    {
+        Some((placement, at)) if at == pass || (at + 1 == pass && !after_interface) => {
+            Some(placement)
+        }
+        _ => None,
+    }
+}
+
 impl Host {
+    /// Ends the mods process: closing its input lets it shut its webview
+    /// down cleanly, storage written; a process still there after five
+    /// seconds is killed. Waited for off the interface thread.
+    fn stop(self) {
+        let Host {
+            mut process, stdin, ..
+        } = self;
+        drop(stdin);
+        let _ = std::thread::Builder::new()
+            .name("mods-stop".into())
+            .spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    if process.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let _ = process.kill();
+                let _ = process.wait();
+            });
+    }
+
     fn start(dir: &Path, data: &Path, ctx: egui::Context) -> Option<Self> {
         let exe = std::env::current_exe()
             .inspect_err(|error| log::warn!("Mods: could not find the program to run: {error}"))
@@ -471,9 +526,8 @@ impl Host {
             commands,
             reply_to,
             replies,
-            has_page: has_page(dir),
-            name: page_name(dir),
             placed: None,
+            hidden_since: None,
             page: None,
             sent: None,
         })

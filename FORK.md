@@ -14,7 +14,9 @@ button beside Lyrics in the player bar (sparkles, named after the mod)
 opens it below the top bar, as ivLyrics looks in Spotify. Spotifast's own
 lyrics panel stays on its Lyrics button. With the mod's page open,
 full-screen lyrics show the mod below the header. Back, or going to
-another page, closes it. The app tells the child where that area is each
+another page, closes it. The mods process starts the first time the page is shown
+and stops 30 seconds after nothing shows it, freeing its webview (about a
+gigabyte with ivLyrics); showing it again starts it afresh. The app tells the child where that area is each
 time it changes and hides it when no lyrics view is open. If the child
 fails, Spotifast's own lyrics come back. Elsewhere it is a window of its
 own. The app writes the playing item to the child's stdin as JSON lines;
