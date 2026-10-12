@@ -35,6 +35,22 @@ Web API sign-in opens the browser only after its local callback port is availabl
 port 8989 is occupied, the sign-in screen keeps the error visible. Close the
 app using that port, then choose **Try again**.
 
+Artist pages read popular tracks over the verified account's local playback
+session when it is ready. The list uses that account's country, or Spotify's
+worldwide (`ZZ`) ranking when its country is absent, and keeps the first ten
+tracks in Spotify's order. Track details arrive in one metadata batch. If the
+session is unavailable or cannot answer, the existing shared Web API route
+remains the fallback, including its rate limits. A different account's playback
+session never supplies this list.
+An explicitly empty ranking is kept. If a nonempty ranking resolves to no
+tracks, the Web API gets its turn rather than showing a false empty answer.
+
+Background reads have separate four-request budgets for the shared Web API,
+the personal Web API, and the playback session. Waiting for shared sign-in or
+rate-limit recovery therefore cannot occupy the personal app's or playback
+session's slots. A failed session read releases its slot before trying the Web
+API. Foreground requests retain their existing transport concurrency limit.
+
 Since 0.8.0, local playback retains the artist IDs
 already supplied by librespot. Artist links in the player bar work before the
 Web API's track metadata arrives, without an extra request.
@@ -60,7 +76,12 @@ signing in again.
 
 By default, Spotifast uses the public app shared with spotify-player, ncspot,
 and Omarchy Spotify. Spotify divides its quota among all users. A personal app
-adds a separate Development Mode quota. See
+adds a separate Development Mode quota. Playback state is checked every 15
+seconds, every 20 while this computer's player is active, every 30 while the
+window cannot be seen and nothing plays, every 4 while the window is visible
+for ten seconds after a command or a switch to another device, once more
+just after a song on another device should end, and as soon as this computer's
+player stops. See
 [Use a Personal Spotify App](/make-it-even-faster/).
 
 Since 0.8.0, a search runs as two requests when a
@@ -196,6 +217,11 @@ dropped connection, a read that takes longer than 30 seconds, or a page whose
 song details Spotify did not supply in full, hands the read to the Web API
 instead of caching rows without songs. A song Spotify no longer has, or
 withholds for legal reasons, is an empty row, as the Web API shows it.
+
+The playlist list and Made for you searches go through the shared app even
+when a personal app is set up. While the shared app waits out Spotify's
+limits, the sidebar and Home show what they last showed for the account,
+from the cache described in [Settings & Files](/settings-and-files/).
 
 Spotify can also explicitly refuse the key needed to decrypt a track. When
 that happens, Spotifast stops local playback and leaves the rest of the queue

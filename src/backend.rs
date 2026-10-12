@@ -550,6 +550,23 @@ pub enum PlaylistCacheRows {
     },
 }
 
+/// Work for the playlist cache writer, done in the order it was queued.
+enum PlaylistCacheJob {
+    Write(PlaylistCacheWrite),
+    /// Remove every account's cached playlist pages, after the writes
+    /// before it and before the ones after it.
+    Purge(std::path::PathBuf),
+}
+
+impl PlaylistCacheJob {
+    fn into_write(self) -> Option<PlaylistCacheWrite> {
+        match self {
+            Self::Write(write) => Some(write),
+            Self::Purge(_) => None,
+        }
+    }
+}
+
 struct PlaylistCacheWrite {
     path: std::path::PathBuf,
     account_id: String,
@@ -716,6 +733,12 @@ pub enum Command {
         generation: u64,
     },
     StoreLikedSongsCache(crate::liked::Cache),
+    /// Read the verified account's last playlist list and Home shelves.
+    LoadAccountCaches {
+        generation: u64,
+    },
+    StoreLibraryCache(crate::account_cache::Cache<Vec<Playlist>>),
+    StoreHomeCache(crate::account_cache::Cache<crate::model::HomeSnapshot>),
     /// Resolve the precise type of Web API singles through the streaming session.
     AlbumTypes(Vec<String>),
     /// Ask the streaming session which saved shows are audiobooks.
@@ -870,6 +893,12 @@ pub enum Event {
     },
     /// OS reports network reachability changed.
     NetworkStatus(bool),
+    AccountCaches {
+        account_id: String,
+        generation: u64,
+        playlists: Option<Vec<Playlist>>,
+        home: Option<crate::model::HomeSnapshot>,
+    },
 }
 
 /// The state of playback on this computer, independent of Web API sign-in.
@@ -926,6 +955,11 @@ pub struct Backend {
     album_type_requests: std::sync::Mutex<Vec<Vec<String>>>,
     #[cfg(test)]
     home_episode_requests: std::sync::Mutex<Vec<(Vec<String>, u64)>>,
+    #[cfg(test)]
+    library_cache_stores: std::sync::Mutex<Vec<crate::account_cache::Cache<Vec<Playlist>>>>,
+    #[cfg(test)]
+    home_cache_stores:
+        std::sync::Mutex<Vec<crate::account_cache::Cache<crate::model::HomeSnapshot>>>,
 }
 
 impl Backend {
@@ -1014,6 +1048,10 @@ impl Backend {
             album_type_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             home_episode_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            library_cache_stores: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            home_cache_stores: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1030,6 +1068,20 @@ impl Backend {
     }
 
     pub fn send(&self, command: Command) {
+        #[cfg(test)]
+        if let Command::StoreLibraryCache(cache) = &command {
+            self.library_cache_stores
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(cache.clone());
+        }
+        #[cfg(test)]
+        if let Command::StoreHomeCache(cache) = &command {
+            self.home_cache_stores
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(cache.clone());
+        }
         if self.offline
             && !matches!(
                 command,
@@ -1146,6 +1198,30 @@ impl Backend {
                 ));
         }
         self.send(Command::Api(request));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_library_cache_stores(
+        &self,
+    ) -> Vec<crate::account_cache::Cache<Vec<Playlist>>> {
+        std::mem::take(
+            &mut *self
+                .library_cache_stores
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_home_cache_stores(
+        &self,
+    ) -> Vec<crate::account_cache::Cache<crate::model::HomeSnapshot>> {
+        std::mem::take(
+            &mut *self
+                .home_cache_stores
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 
     #[cfg(test)]
@@ -1452,7 +1528,7 @@ struct Worker {
     http: Http,
     api: Arc<ApiGateway>,
     connect: Arc<crate::sonos::Controller>,
-    background_api: Arc<tokio::sync::Semaphore>,
+    background_session: Arc<tokio::sync::Semaphore>,
     art: ArtLoader,
     events: std::sync::mpsc::Sender<Event>,
     commands: mpsc::UnboundedSender<Command>,
@@ -1500,6 +1576,7 @@ struct Worker {
 
 impl Worker {
     #[allow(clippy::too_many_arguments)]
+    /// Initialize account-scoped dispatch state and the independent session background budget.
     fn new(
         dirs: AppDirs,
         engine_config: EngineConfig,
@@ -1532,7 +1609,7 @@ impl Worker {
             web_client_id,
             api: Arc::new(ApiGateway::new(http.clone(), activity)),
             connect: Arc::default(),
-            background_api: Arc::new(tokio::sync::Semaphore::new(4)),
+            background_session: Arc::new(tokio::sync::Semaphore::new(4)),
             http,
             art,
             events,
@@ -1818,7 +1895,21 @@ impl Worker {
                     }
                     self.pending_authorization = None;
                 }
-                Command::SignOut => self.sign_out(),
+                Command::SignOut => {
+                    self.sign_out();
+                    // The account caches go in command order, so nothing a
+                    // sign-in after this stores goes with them. This loop
+                    // writes the snapshots, so they go now. The playlist
+                    // pages queue behind a page still being written and
+                    // ahead of the next account's.
+                    for dir in self.dirs.account_snapshot_dirs() {
+                        log_cache_removal(&dir, tokio::fs::remove_dir_all(&dir).await);
+                    }
+                    let purge = PlaylistCacheJob::Purge(self.dirs.playlist_cache_dir());
+                    if cache_writes.send(purge).await.is_err() {
+                        log::warn!("unable to remove the playlist caches: writer unavailable");
+                    }
+                }
                 Command::AuthorizePlayback => self.authorize_playback(),
                 Command::RestartEngine(mut config) => {
                     // Audio settings must not revert a proxy change whose UI
@@ -2081,17 +2172,19 @@ impl Worker {
                             .dirs
                             .account_playlist_cache_dir(&account_id)
                             .join(format!("{id}.json"));
-                        if let Err(error) = cache_writes.try_send(PlaylistCacheWrite {
-                            path,
-                            account_id,
-                            id,
-                            generation,
-                            snapshot,
-                            rows,
-                            total,
-                            next_offset,
-                        }) {
-                            let write = error.into_inner();
+                        if let Err(error) =
+                            cache_writes.try_send(PlaylistCacheJob::Write(PlaylistCacheWrite {
+                                path,
+                                account_id,
+                                id,
+                                generation,
+                                snapshot,
+                                rows,
+                                total,
+                                next_offset,
+                            }))
+                            && let Some(write) = error.into_inner().into_write()
+                        {
                             log::warn!(
                                 "unable to queue playlist cache {}: writer unavailable",
                                 write.path.display()
@@ -2141,6 +2234,50 @@ impl Worker {
                         let path = self.dirs.liked_songs_cache_file(&cache.account_id);
                         if let Err(error) = crate::liked::write(&path, &cache).await {
                             log::warn!("unable to store Liked Songs cache: {error}");
+                        }
+                    }
+                }
+                Command::LoadAccountCaches { generation } => {
+                    if let Some(account) = self.api.account() {
+                        let account_id = account.as_str().to_string();
+                        let library = self.dirs.library_cache_file(&account_id);
+                        let home = self.dirs.home_cache_file(&account_id);
+                        let events = self.events.clone();
+                        let waker = self.waker.clone();
+                        tokio::spawn(async move {
+                            let playlists = crate::account_cache::read(&library, &account_id).await;
+                            let home = crate::account_cache::read(&home, &account_id).await;
+                            let _ = events.send(Event::AccountCaches {
+                                account_id,
+                                generation,
+                                playlists,
+                                home,
+                            });
+                            waker.wake();
+                        });
+                    }
+                }
+                Command::StoreLibraryCache(cache) => {
+                    if self
+                        .api
+                        .account()
+                        .is_some_and(|account| account.as_str() == cache.account_id)
+                    {
+                        let path = self.dirs.library_cache_file(&cache.account_id);
+                        if let Err(error) = crate::account_cache::write(&path, &cache).await {
+                            log::warn!("unable to store the playlist list cache: {error}");
+                        }
+                    }
+                }
+                Command::StoreHomeCache(cache) => {
+                    if self
+                        .api
+                        .account()
+                        .is_some_and(|account| account.as_str() == cache.account_id)
+                    {
+                        let path = self.dirs.home_cache_file(&cache.account_id);
+                        if let Err(error) = crate::account_cache::write(&path, &cache).await {
+                            log::warn!("unable to store the Home cache: {error}");
                         }
                     }
                 }
@@ -3586,13 +3723,13 @@ impl Worker {
         self.search_tasks.push(self.dispatch(request));
     }
 
+    /// Cancel requests on sign-out and report completion under their original generation.
     fn dispatch(&self, request: ApiRequest) -> tokio::task::AbortHandle {
         let api = Arc::clone(&self.api);
         let connect = Arc::clone(&self.connect);
         let shared_lease = self.credentials.lease(CredentialSlot::Shared);
         let personal_lease = self.credentials.lease(CredentialSlot::Personal);
-        let background_api = Arc::clone(&self.background_api);
-        let background = request.background();
+        let background_session = Arc::clone(&self.background_session);
         let engine = self.engine.clone();
         let commands = self.commands.clone();
         let mut session = self.session.subscribe();
@@ -3601,12 +3738,7 @@ impl Worker {
             let (response, expired) = tokio::select! {
                 _ = session.changed() => return,
                 result = async {
-                    let _background_permit = if background {
-                        background_api.acquire_owned().await.ok()
-                    } else {
-                        None
-                    };
-                    handle(&api, &connect, engine.as_deref(), request).await
+                    handle(&api, &connect, engine.as_deref(), &background_session, request).await
                 } => result,
             };
             // Apply completion on the command loop. A late response cannot
@@ -3665,6 +3797,7 @@ fn is_terminal_credential_error(error: Option<&str>) -> bool {
     })
 }
 
+/// Classify a request by the coverage and playlist permissions its source must provide.
 fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
     match request {
         ApiRequest::Me => Operation::CanonicalAccount,
@@ -3716,9 +3849,10 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::ReorderPlaylist { playlist_id, .. } => {
             Operation::PlaylistMutation(api.playlist_access(playlist_id))
         }
-        ApiRequest::Recommendations { .. }
-        | ApiRequest::ArtistTopTracks { .. }
-        | ApiRequest::RelatedArtists { .. } => Operation::UnsupportedDevelopmentMode,
+        ApiRequest::ArtistTopTracks { .. } => Operation::ArtistTopTracks,
+        ApiRequest::Recommendations { .. } | ApiRequest::RelatedArtists { .. } => {
+            Operation::UnsupportedDevelopmentMode
+        }
         ApiRequest::Artist { .. }
         | ApiRequest::ArtistAlbums { .. }
         | ApiRequest::Album { .. }
@@ -3792,10 +3926,12 @@ fn observe_playlists(api: &ApiGateway, response: &ApiResponse) {
     }
 }
 
+/// Try a same-account session read, then the authorized Web API with its own background budget.
 async fn handle(
     api: &ApiGateway,
     connect: &crate::sonos::Controller,
     engine: Option<&Engine>,
+    background_session: &tokio::sync::Semaphore,
     request: ApiRequest,
 ) -> (ApiResponse, Option<ApiSource>) {
     let operation = operation_for(api, &request);
@@ -3805,11 +3941,20 @@ async fn handle(
     if api.session_serves(operation)
         && let Some(engine) = engine
             .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
-        && let Some(response) = over_session(engine, &request).await
     {
-        log::debug!("Spotify route operation={operation:?} source=session");
-        observe_playlists(api, &response);
-        return (response, None);
+        let response = {
+            let _background_permit = if request.background() {
+                background_session.acquire().await.ok()
+            } else {
+                None
+            };
+            over_session(engine, &request).await
+        };
+        if let Some(response) = response {
+            log::debug!("Spotify route operation={operation:?} source=session");
+            observe_playlists(api, &response);
+            return (response, None);
+        }
     }
     if let Some(engine) =
         engine.filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
@@ -3819,6 +3964,14 @@ async fn handle(
         return (response, None);
     }
     let selected = api.client_for(operation).await;
+    let _background_permit = if request.background() {
+        match &selected {
+            Ok(client) => client.background_permit().await,
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     let expired = std::cell::Cell::new(None);
     macro_rules! routed {
         ($method:ident($($argument:expr),* $(,)?)) => {{
@@ -4333,7 +4486,7 @@ fn same_account(username: &str, account: Option<&AccountId>) -> bool {
 /// the operating system, which is far longer than a page should spin.
 const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Answers a playlist read over the streaming session. `None` when the
+/// Answers a playlist or popular-track read over the streaming session. `None` when the
 /// session could not, leaving the request to the Web API.
 async fn over_session(engine: &Engine, request: &ApiRequest) -> Option<ApiResponse> {
     let session = engine.session();
@@ -4347,6 +4500,9 @@ async fn over_session(engine: &Engine, request: &ApiRequest) -> Option<ApiRespon
             )?),
             SessionRead::Sample { id, offset } => SessionAnswer::Rows(settle(
                 session_reads::sample(session, id, offset, PLAYLIST_PAGE_SIZE).await,
+            )?),
+            SessionRead::ArtistTop { id } => SessionAnswer::ArtistTop(settle(
+                session_reads::artist_top_tracks(session, id).await,
             )?),
         })
     };
@@ -4363,6 +4519,7 @@ async fn over_session(engine: &Engine, request: &ApiRequest) -> Option<ApiRespon
 /// where the session serves the operation.
 #[derive(Debug, PartialEq)]
 enum SessionRead<'a> {
+    ArtistTop { id: &'a str },
     Header { id: &'a str },
     Rows { id: &'a str, offset: u32 },
     Sample { id: &'a str, offset: u32 },
@@ -4370,6 +4527,7 @@ enum SessionRead<'a> {
 
 fn session_read(request: &ApiRequest) -> Option<SessionRead<'_>> {
     Some(match request {
+        ApiRequest::ArtistTopTracks { id } => SessionRead::ArtistTop { id },
         ApiRequest::Playlist { id, .. } => SessionRead::Header { id },
         ApiRequest::PlaylistItems { id, offset, .. } => SessionRead::Rows {
             id,
@@ -4385,6 +4543,7 @@ fn session_read(request: &ApiRequest) -> Option<SessionRead<'_>> {
 
 /// What the session read: a playlist's header, or a page of its rows.
 enum SessionAnswer {
+    ArtistTop(ApiResult<Vec<Track>>),
     Header(ApiResult<Playlist>),
     Rows(ApiResult<Page<PlaylistItem>>),
 }
@@ -4393,6 +4552,12 @@ enum SessionAnswer {
 /// offset, and generation so the app matches it to the page that asked.
 fn session_response(request: &ApiRequest, answer: SessionAnswer) -> Option<ApiResponse> {
     Some(match (request, answer) {
+        (ApiRequest::ArtistTopTracks { id }, SessionAnswer::ArtistTop(result)) => {
+            ApiResponse::ArtistTopTracks {
+                id: id.clone(),
+                result,
+            }
+        }
         (ApiRequest::Playlist { id, generation }, SessionAnswer::Header(result)) => {
             ApiResponse::Playlist {
                 id: id.clone(),
@@ -4561,6 +4726,49 @@ fn playlist_data_path(path: &std::path::Path, data_file: u64) -> std::path::Path
     path.with_extension(format!("rows.{data_file:016x}"))
 }
 
+fn log_cache_removal(path: &std::path::Path, result: std::io::Result<()>) {
+    if let Err(error) = result
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("unable to remove {}: {error}", path.display());
+    }
+}
+
+/// Removes every account's cached playlist pages. Each account's pages are
+/// emptied under its lock, so a reader never sees half of them; the
+/// unlocked lock file and the directories go after.
+fn purge_playlist_caches(root: &std::path::Path) {
+    if let Ok(accounts) = std::fs::read_dir(root) {
+        for account in accounts.flatten() {
+            let dir = account.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let lock = match playlist_cache_lock(&dir.join(".purge")) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    log::warn!("unable to lock {}: {error}", dir.display());
+                    continue;
+                }
+            };
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if entry.file_name() == ".playlist-cache.lock" {
+                    continue;
+                }
+                let removed = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                log_cache_removal(&path, removed);
+            }
+            drop(lock);
+        }
+    }
+    log_cache_removal(root, std::fs::remove_dir_all(root));
+}
+
 fn playlist_cache_lock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -4686,11 +4894,21 @@ fn read_incremental_playlist_cache_file(path: &std::path::Path) -> std::io::Resu
 
 /// Keep writes in command order without making the command loop wait for disk.
 async fn store_playlist_caches(
-    mut writes: mpsc::Receiver<PlaylistCacheWrite>,
+    mut writes: mpsc::Receiver<PlaylistCacheJob>,
     events: std::sync::mpsc::Sender<Event>,
     waker: Waker,
 ) {
-    while let Some(write) = writes.recv().await {
+    while let Some(job) = writes.recv().await {
+        let write = match job {
+            PlaylistCacheJob::Write(write) => write,
+            PlaylistCacheJob::Purge(root) => {
+                let purged = tokio::task::spawn_blocking(move || purge_playlist_caches(&root));
+                if let Err(error) = purged.await {
+                    log::warn!("unable to remove the playlist caches: {error}");
+                }
+                continue;
+            }
+        };
         let PlaylistCacheWrite {
             path,
             account_id,
@@ -5529,6 +5747,144 @@ mod authorization_tests {
             "a pending disk write blocked the command loop"
         );
         assert_eq!(read_playlist_manifest(&path).unwrap().snapshot, "old");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Signing out removes every account's cached library: playlist pages,
+    /// the playlist list, Home and Liked Songs. A playlist page still being
+    /// written when it happens is removed with the rest, not left behind.
+    #[test]
+    fn signing_out_removes_the_account_caches_after_pending_writes() {
+        let (runtime, mut worker, _events) = worker("sign-out-purges-caches");
+        worker
+            .api
+            .install(ApiSource::Shared, AccountId::new("alice"))
+            .unwrap();
+        let root = worker.dirs.cache.parent().unwrap().to_path_buf();
+        let others = [
+            worker.dirs.library_cache_file("alice"),
+            worker.dirs.home_cache_file("alice"),
+            worker.dirs.liked_songs_cache_file("alice"),
+            worker
+                .dirs
+                .account_playlist_cache_dir("bob")
+                .join("theirs.json"),
+        ];
+        for file in &others {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"{}").unwrap();
+        }
+        let path = worker
+            .dirs
+            .account_playlist_cache_dir("alice")
+            .join("mix.json");
+        let dirs = worker.dirs.account_cache_dirs();
+        // The page write waits on this lock while the sign-out arrives.
+        let lock = playlist_cache_lock(&path).unwrap();
+        let (commands, receiver) = mpsc::unbounded_channel();
+        commands
+            .send(Command::StorePlaylistCache {
+                id: "mix".into(),
+                generation: 1,
+                snapshot: "old".into(),
+                rows: PlaylistCacheRows::Replace(vec![PlaylistItem::default()]),
+                total: 1,
+                next_offset: None,
+            })
+            .unwrap();
+        commands.send(Command::SignOut).unwrap();
+        commands.send(Command::Shutdown).unwrap();
+        let thread = std::thread::spawn(move || runtime.block_on(worker.run(receiver)));
+        std::thread::sleep(Duration::from_millis(200));
+        drop(lock);
+        thread.join().unwrap();
+
+        for dir in &dirs {
+            assert!(!dir.exists(), "{} was left behind", dir.display());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The account caches go in command order: an account that signs in
+    /// right after a sign-out keeps what it stores, even while a page of
+    /// the previous account still holds the removal of the pages back.
+    #[test]
+    fn a_sign_in_right_after_sign_out_keeps_its_caches() {
+        let (runtime, mut worker, events) = worker("sign-out-then-sign-in");
+        worker
+            .api
+            .install(ApiSource::Shared, AccountId::new("alice"))
+            .unwrap();
+        let api = worker.api.clone();
+        let root = worker.dirs.cache.parent().unwrap().to_path_buf();
+        let theirs = [
+            worker.dirs.library_cache_file("alice"),
+            worker.dirs.home_cache_file("alice"),
+        ];
+        for file in &theirs {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"{}").unwrap();
+        }
+        let mine = [
+            worker.dirs.library_cache_file("carol"),
+            worker.dirs.home_cache_file("carol"),
+        ];
+        let path = worker
+            .dirs
+            .account_playlist_cache_dir("alice")
+            .join("mix.json");
+        let lock = playlist_cache_lock(&path).unwrap();
+        let (commands, receiver) = mpsc::unbounded_channel();
+        commands
+            .send(Command::StorePlaylistCache {
+                id: "mix".into(),
+                generation: 1,
+                snapshot: "old".into(),
+                rows: PlaylistCacheRows::Replace(vec![PlaylistItem::default()]),
+                total: 1,
+                next_offset: None,
+            })
+            .unwrap();
+        commands.send(Command::SignOut).unwrap();
+        let thread = std::thread::spawn(move || runtime.block_on(worker.run(receiver)));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let signed_out = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(remaining) {
+                Ok(Event::Auth(AuthStatus::SignedOut)) => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        api.install(ApiSource::Shared, AccountId::new("carol"))
+            .unwrap();
+        commands
+            .send(Command::StoreLibraryCache(
+                crate::account_cache::Cache::new("carol".into(), Vec::new()),
+            ))
+            .unwrap();
+        commands
+            .send(Command::StoreHomeCache(crate::account_cache::Cache::new(
+                "carol".into(),
+                crate::model::HomeSnapshot::default(),
+            )))
+            .unwrap();
+        commands.send(Command::Shutdown).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        drop(lock);
+        thread.join().unwrap();
+
+        assert!(signed_out);
+        for file in &theirs {
+            assert!(!file.exists(), "{} was left behind", file.display());
+        }
+        assert!(
+            !path.exists(),
+            "the previous account's page was left behind"
+        );
+        for file in &mine {
+            assert!(file.exists(), "{} was removed", file.display());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6621,6 +6977,86 @@ fn playback_account_matches(credentials: &Credentials, account: Option<AccountId
 mod session_tests {
     use super::*;
     use crate::session_reads::Failure;
+
+    /// Queued Shared and session work must not delay a Personal background read.
+    #[tokio::test]
+    async fn shared_and_session_saturation_do_not_block_personal_background_reads() {
+        let api = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        for source in [ApiSource::Shared, ApiSource::Personal] {
+            api.set_state(
+                source,
+                SessionState::Ready {
+                    account: AccountId::new("test-account"),
+                },
+            );
+        }
+        let shared = api.client_for(Operation::PlaylistLibrary).await.unwrap();
+        let mut held_shared = Vec::new();
+        for _ in 0..4 {
+            held_shared.push(shared.background_permit().await.unwrap());
+        }
+        let background_session = tokio::sync::Semaphore::new(4);
+        let _held_session = background_session.acquire_many(4).await.unwrap();
+        let (response, expired) = tokio::time::timeout(
+            Duration::from_secs(1),
+            handle(
+                &api,
+                &crate::sonos::Controller::default(),
+                None,
+                &background_session,
+                ApiRequest::TopArtists { generation: 7 },
+            ),
+        )
+        .await
+        .expect("a personal background read must reach its own client");
+        assert!(matches!(
+            response,
+            ApiResponse::TopArtists {
+                generation: 7,
+                result: Err(ApiError::NotSignedIn)
+            }
+        ));
+        assert_eq!(expired, None);
+    }
+
+    /// Popular-track responses retain artist identity and the existing fallback/error policy.
+    #[test]
+    fn popular_tracks_keep_the_requested_artist_and_existing_failure_policy() {
+        let api = ApiGateway::new(reqwest::Client::new(), Arc::new(NetActivity::default()));
+        let request = ApiRequest::ArtistTopTracks {
+            id: "artist1".into(),
+        };
+        assert_eq!(operation_for(&api, &request), Operation::ArtistTopTracks);
+        assert_eq!(
+            session_read(&request),
+            Some(SessionRead::ArtistTop { id: "artist1" })
+        );
+        assert!(
+            matches!(session_response(&request, SessionAnswer::ArtistTop(Ok(Vec::new()))),
+            Some(ApiResponse::ArtistTopTracks { id, result: Ok(tracks) }) if id == "artist1" && tracks.is_empty())
+        );
+        let transient = settle(Err::<Vec<Track>, Failure>(Failure::Retry(anyhow::anyhow!(
+            "connection lost"
+        ))));
+        assert!(
+            transient.is_none(),
+            "transient failures retain Web API fallback"
+        );
+        let refused = settle(Err::<Vec<Track>, Failure>(Failure::Definitive(
+            ApiError::Status {
+                status: 403,
+                message: "Forbidden".into(),
+            },
+        )))
+        .unwrap();
+        assert!(matches!(
+            session_response(&request, SessionAnswer::ArtistTop(refused)),
+            Some(ApiResponse::ArtistTopTracks {
+                result: Err(ApiError::Status { status: 403, .. }),
+                ..
+            })
+        ));
+    }
 
     /// The session answers only for the account the Web API verified.
     #[test]
