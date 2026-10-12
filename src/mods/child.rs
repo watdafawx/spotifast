@@ -257,9 +257,21 @@ impl Mods {
                 let _ = window.request_inner_size(PhysicalSize::new(at.width, at.height));
                 if window.is_visible() != Some(true) {
                     window.set_visible(true);
+                    if let Some(webview) = &self.webview {
+                        let _ = webview.set_visible(true);
+                    }
                 }
             }
-            None => window.set_visible(false),
+            None => {
+                // Hiding the window alone leaves WebView2 drawing (a video
+                // background, animations) for no one; told it is hidden, it
+                // stops rendering and throttles timers. The page and its
+                // state stay, so it comes back at once.
+                if let Some(webview) = &self.webview {
+                    let _ = webview.set_visible(false);
+                }
+                window.set_visible(false);
+            }
         }
     }
 }
