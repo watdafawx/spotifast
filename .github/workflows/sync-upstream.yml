@@ -1,7 +1,17 @@
 # Fork only: merge crmne/spotifast into the mods branch every day.
-# A clean merge that builds is pushed. Anything else fails the run, with the
-# conflicting files in its summary; GitHub emails the owner about a failed
-# scheduled run (forks have Issues off, so no issue is opened).
+#
+# merge (Linux): merges upstream/main into mods. A Cargo.lock clash takes
+# upstream's lockfile and lets cargo add the fork's crates back. Any other
+# conflict is handed to Claude (claude-code-action), which resolves it by
+# FORK.md's rules and stages the result; it may only read, edit and stage
+# files. The merge goes to sync/upstream for the next job.
+#
+# verify (Windows, where the mods code compiles): builds with mods and runs
+# the tests; only then does mods move. Any failure fails the run, and GitHub
+# emails the owner about a failed scheduled run.
+#
+# Needs the CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`); it is
+# used only when a merge conflicts.
 name: Sync upstream
 
 on:
@@ -11,10 +21,13 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  sync:
-    runs-on: windows-latest
+  merge:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.merge.outputs.result }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,7 +36,6 @@ jobs:
 
       - name: Merge upstream
         id: merge
-        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
@@ -34,37 +46,100 @@ jobs:
             echo "result=current" >> "$GITHUB_OUTPUT"
           elif git merge --no-edit upstream/main; then
             echo "result=merged" >> "$GITHUB_OUTPUT"
-          elif [ "$(git diff --name-only --diff-filter=U)" = "Cargo.lock" ]; then
-            # Only the lockfile clashed: take upstream's and let cargo add
-            # back the fork's crates (wry and what it pulls in).
-            git checkout --theirs Cargo.lock
-            cargo metadata --features mods --format-version 1 > /dev/null
-            git add Cargo.lock
-            git commit --no-edit
-            echo "result=merged" >> "$GITHUB_OUTPUT"
           else
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
             {
-              echo "Merging upstream/main into mods needs a hand:"
-              echo
-              echo '    git fetch upstream && git merge upstream/main'
-              echo
               echo "Conflicting files:"
               git diff --name-only --diff-filter=U | sed 's/^/- /'
             } >> "$GITHUB_STEP_SUMMARY"
-            git merge --abort
-            exit 1
           fi
 
+      - name: Resolve conflicts with Claude
+        if: steps.merge.outputs.result == 'conflict'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: >-
+            --max-turns 80
+            --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git add:*)"
+          prompt: |
+            This repository is a fork of crmne/spotifast. A merge of upstream/main
+            into the fork's `mods` branch has stopped with conflicts. Resolve every
+            conflicted file except Cargo.lock (the workflow resolves the lockfile),
+            then `git add` each one. Do not commit, push, or touch files that are not
+            conflicted.
+
+            Read FORK.md first: it lists every change the fork makes to upstream
+            files. Rules:
+            - Upstream's version wins for upstream's own code: keep its new
+              behaviour, renames, refactors and removals.
+            - Keep every fork change FORK.md lists, re-applied on top of upstream's
+              new code: the `cfg(feature = "mods")` hooks, the glass-theme code in
+              entrypoint.rs, window.rs and ui/mod.rs, `src/mods/`, and the
+              `windows-sys` features the fork adds (Win32_Graphics_Dwm,
+              Win32_UI_Controls) on top of upstream's list.
+            - When both sides edit the same lines for different reasons, combine
+              them so both still happen. If upstream removed code a fork change
+              lived in, move the fork change to where that code went.
+            - Keep the code compiling: match upstream's new types and signatures.
+            - Leave no conflict markers. Change nothing beyond the conflicts.
+
+            Use `git diff`, `git log -p upstream/main` and `git show` to see what
+            each side changed. Finish with `git status` showing no unmerged paths
+            other than Cargo.lock.
+
+      - name: Finish the merge
+        if: steps.merge.outputs.result == 'conflict'
+        run: |
+          if git diff --name-only --diff-filter=U | grep -qx Cargo.lock; then
+            git checkout --theirs Cargo.lock
+            cargo metadata --features mods --format-version 1 > /dev/null
+            git add Cargo.lock
+          fi
+          unmerged="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$unmerged" ]; then
+            echo "Still unmerged after Claude:" >> "$GITHUB_STEP_SUMMARY"
+            echo "$unmerged" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if git diff --cached -G'^(<<<<<<<|>>>>>>>) ' --name-only | grep -q .; then
+            echo "Conflict markers were left in the resolution." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git commit --no-edit
+          {
+            echo "Claude resolved the conflicts:"
+            echo '```'
+            git show --stat --format='%h %s' HEAD
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand over to verify
+        if: steps.merge.outputs.result != 'current'
+        run: git push --force origin HEAD:refs/heads/sync/upstream
+
+  verify:
+    needs: merge
+    if: needs.merge.outputs.result != 'current'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sync/upstream
+          fetch-depth: 0
+
       - name: Build and test
-        if: steps.merge.outputs.result == 'merged'
         run: |
           cargo build --no-default-features --features mods
-          cargo test --no-default-features --features mods --lib mods::
+          cargo test --no-default-features --features mods --lib
 
-      - name: Push
-        if: steps.merge.outputs.result == 'merged'
+      - name: Move mods
         shell: bash
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           # Commits pushed to mods while this ran come along, not get refused.
           git pull --no-rebase --no-edit origin mods
-          git push origin mods
+          git push origin HEAD:mods
+          git push origin --delete sync/upstream

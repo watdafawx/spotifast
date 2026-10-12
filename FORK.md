@@ -102,12 +102,14 @@ These touch upstream code directly, so expect them in merge conflicts.
 Keep it that way: anything new goes in `src/mods/`, reading `App`'s public
 fields (`now_playing()`, `actions`, `dirs`) rather than adding to `App`.
 
-The `Sync upstream` workflow merges `upstream/main` daily, builds, runs the
-mods tests, and pushes; with nothing new upstream it stops there. A
-`Cargo.lock` clash is resolved by taking upstream's lockfile and letting
-cargo add the fork's crates back; any other conflict fails the run with
-the conflicting files in its summary, and GitHub emails the owner. By
-hand:
+The `Sync upstream` workflow merges `upstream/main` daily; with nothing new
+upstream it stops there. A `Cargo.lock` clash takes upstream's lockfile and
+lets cargo add the fork's crates back. Any other conflict is resolved by
+Claude (`anthropics/claude-code-action`, on the `CLAUDE_CODE_OAUTH_TOKEN`
+secret) following this file's list of fork changes; it may only read, edit
+and stage files. A Windows job then builds with mods and runs the tests,
+and only then does `mods` move. Any failure fails the run, with details in
+its summary, and GitHub emails the owner. By hand:
 
 ```bash
 git fetch upstream && git merge upstream/main
