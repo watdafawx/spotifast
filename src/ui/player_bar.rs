@@ -366,7 +366,7 @@ fn eased_fill(ctx: &egui::Context, panel: Color32, tint: Option<Color32>) -> Col
         ctx.animate_value_with_time(
             egui::Id::new(("player-bar-tint", session, axis)),
             f32::from(value),
-            TINT_FADE_SECONDS,
+            crate::motion::seconds(ctx, TINT_FADE_SECONDS),
         )
         .round() as u8
     };
@@ -411,14 +411,14 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
         return;
     };
 
-    super::widgets::paint_cover(
+    super::widgets::playing_cover(
         ui,
         &palette,
-        now.art_small.as_deref().or(now.art_url.as_deref()),
+        app.backend.art(),
+        "player-bar",
+        app.small_art(now, cover_rect.width()),
         cover_rect,
         6.0,
-        Icon::Music,
-        Some(app.backend.art()),
     );
     let song = app.now_playing_item();
     let drag_sense = if song.is_some() {
@@ -876,9 +876,14 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>) {
     }
     ui.add_space(4.0);
     let remote = now.is_some_and(|now| !now.local);
+    // Playing elsewhere, the button shows that device's own icon.
+    let icon = now
+        .filter(|now| !now.local)
+        .and_then(|now| now.device_kind.as_deref())
+        .map_or(Icon::Speaker, super::devices::device_icon);
     let devices = theme::icon_button(
         ui,
-        Icon::Speaker,
+        icon,
         18.0,
         if remote {
             palette.accent

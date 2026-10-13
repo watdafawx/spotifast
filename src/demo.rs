@@ -219,6 +219,13 @@ fn playlist(index: usize) -> Playlist {
         tracks: Some(TrackCount {
             total: 30 + index as u32 * 7,
         }),
+        followers: Some(Followers {
+            total: if spotify_owned {
+                1_845_680
+            } else {
+                12_345 + index as u64
+            },
+        }),
         ..Playlist::default()
     }
 }
@@ -265,6 +272,7 @@ fn page<T>(items: Vec<T>) -> ApiPage<T> {
     }
 }
 
+/// Populates the offline app with cards for screenshots and UI tests.
 pub fn populate(app: &mut App) {
     app.backend.set_offline(true);
     app.offline = true;
@@ -328,6 +336,11 @@ pub fn populate(app: &mut App) {
     app.playlist_pages.insert("pl1".into(), playlist_page);
     app.user_names.insert("kasia".into(), Some("Kasia".into()));
     app.user_names.insert("sam".into(), Some("Sam".into()));
+    // The playlist owner's picture, as the profile view would answer.
+    app.user_images.insert(
+        "demo".into(),
+        Some(image(1).first().map(|image| image.url.clone()).unwrap()),
+    );
     let mut discover_page = PlaylistPage {
         playlist: Loadable::Loaded(playlists[0].clone()),
         ..PlaylistPage::default()
@@ -522,16 +535,7 @@ pub fn populate(app: &mut App) {
     app.home.top_songs = Loadable::Loaded(tracks.iter().skip(10).cloned().collect());
     app.home.top_songs_complete = true;
     app.home.recommendations = Loadable::Loaded(tracks.iter().skip(20).take(10).cloned().collect());
-    for term in DISCOVER_TERMS {
-        let matching: Vec<Playlist> = playlists
-            .iter()
-            .filter(|playlist| playlist.name.to_lowercase().contains(&term.to_lowercase()))
-            .cloned()
-            .collect();
-        app.home
-            .discover
-            .insert((*term).to_string(), Loadable::Loaded(matching));
-    }
+    app.home.made_for_you = Loadable::Loaded(playlists.iter().take(10).cloned().collect());
 
     // Search.
     app.search.query = "Bonobo".into();
@@ -593,6 +597,7 @@ pub fn populate(app: &mut App) {
         address: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 42)),
         port: 5555,
         path: "/zc".into(),
+        cast: false,
     }];
     app.remote = Some(RemoteSnapshot {
         state: PlaybackState {
@@ -618,6 +623,22 @@ pub fn populate(app: &mut App) {
     }
 }
 
+#[cfg(feature = "demo")]
+fn cast_devices(app: &mut App, connecting: bool) {
+    app.show_devices = true;
+    app.receivers.push(crate::zeroconf::Receiver {
+        name: "Living room".into(),
+        device_id: Some(crate::cast::device_id("Living room")),
+        address: "192.168.1.43".parse().unwrap(),
+        port: 8009,
+        path: "/".into(),
+        cast: true,
+    });
+    if connecting {
+        app.activating_receiver = Some("Living room".into());
+    }
+}
+
 #[cfg(any(test, feature = "demo"))]
 fn sonos_devices(app: &mut App, active: bool) {
     app.show_devices = true;
@@ -627,6 +648,7 @@ fn sonos_devices(app: &mut App, active: bool) {
         address: "192.168.1.10".parse().unwrap(),
         port: 1400,
         path: "/spotifyzc".into(),
+        cast: false,
     }];
     app.devices
         .retain(|device| device.id.as_deref() != Some("office"));
@@ -780,15 +802,48 @@ fn demo_sound() -> Vec<f64> {
         .collect()
 }
 
+/// Select sample pages and UI states for deterministic, unauthenticated demos.
+/// The By You fixtures cover owned rows and an intentionally unmatched search.
 #[cfg(feature = "demo")]
 pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
     // Default screenshots to the main window regardless of saved settings.
     app.settings.winamp_window = false;
+    if page == Some("prerelease") {
+        let uri = "spotify:prerelease:0kRaNkRxpO16BjxJU0IQAL";
+        if let Ok(mut data) =
+            crate::prerelease::Prerelease::decode(include_bytes!("testdata/prerelease.pb"), uri)
+        {
+            let body =
+                serde_json::from_str(include_str!("testdata/prerelease-album.json")).unwrap();
+            let (tracks, total) = data.album_preview(&body).unwrap();
+            data.tracks = tracks;
+            data.album.total_tracks = Some(total);
+            data.saved = Some(false);
+            let id = data.album.id.clone();
+            app.album_pages.insert(
+                id.clone(),
+                AlbumPage {
+                    album: Loadable::Loaded(data.album.clone()),
+                    prerelease: Some(data),
+                    ..Default::default()
+                },
+            );
+            app.local_ready = true;
+            app.open(Page::Album(id));
+        }
+    }
     if let Some(page) = page.and_then(Page::decode) {
         app.open(page);
     }
     for surface in show.unwrap_or("").split(',').map(str::trim) {
         match surface {
+            "presaved" => {
+                for page in app.album_pages.values_mut() {
+                    if let Some(data) = &mut page.prerelease {
+                        data.saved = Some(true);
+                    }
+                }
+            }
             "library-list"
             | "library-list-narrow"
             | "library-list-wide"
@@ -804,6 +859,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 } else {
                     380.0
                 };
+            }
+            "library-by-you" => app.settings.library_by_you = true,
+            "library-by-you-empty" => {
+                app.settings.library_by_you = true;
+                app.library.filter = "No matching playlist".into();
             }
             "queue" => app.show_queue_panel = true,
             "playing-next" => {
@@ -905,6 +965,19 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "devices" => app.show_devices = true,
             "sonos-idle" => sonos_devices(app, false),
             "sonos-active" => sonos_devices(app, true),
+            // The phone plays instead of the speaker, for captures of how
+            // remote playback names and draws the playing device.
+            "phone-playing" => {
+                for device in &mut app.devices {
+                    device.is_active = device.kind == "smartphone";
+                }
+                if let Some(remote) = &mut app.remote {
+                    remote.state.device =
+                        app.devices.iter().find(|device| device.is_active).cloned();
+                }
+            }
+            "cast-idle" => cast_devices(app, false),
+            "cast-connecting" => cast_devices(app, true),
             // These paired states capture both outcomes of the collection
             // Shuffle click for the PR visual comparison.
             "shuffle-selected" => {
@@ -1576,6 +1649,65 @@ mod tests {
             "focused Space must pause once, without firing the global shortcut too"
         );
         assert_eq!(tree.focus, pause);
+        app.backend.shutdown();
+    }
+
+    /// Drive By You through accessible button actions, verify owned rows remain
+    /// visible, and confirm switching shelves preserves the remembered choice.
+    #[test]
+    fn by_you_sidebar_filter_can_be_toggled_and_survives_shelf_switches() {
+        use egui::accesskit::{Action as AccessibleAction, Role};
+        let (ctx, mut app) = accessible_app("by-you");
+        app.settings.art_expanded = false;
+        accessible_frame(&ctx, &mut app, vec![]);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        accessible_node(&tree, "Discover Weekly", Role::Button);
+        let by_you = accessible_node(&tree, "By You", Role::Button);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(by_you, AccessibleAction::Click, None)],
+        );
+        assert!(app.settings.library_by_you);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        accessible_node(&tree, "Liked Songs", Role::Button);
+        accessible_node(&tree, "Late night focus", Role::Button);
+        assert!(
+            !tree
+                .nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Discover Weekly"))
+        );
+        let albums = accessible_node(&tree, "Albums", Role::Button);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(albums, AccessibleAction::Click, None)],
+        );
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        assert!(
+            !tree
+                .nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("By You"))
+        );
+        let playlists = accessible_node(&tree, "Playlists", Role::Button);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(playlists, AccessibleAction::Click, None)],
+        );
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let by_you = accessible_node(&tree, "By You", Role::Button);
+        assert!(app.settings.library_by_you);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(by_you, AccessibleAction::Click, None)],
+        );
+        assert!(!app.settings.library_by_you);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        accessible_node(&tree, "Discover Weekly", Role::Button);
         app.backend.shutdown();
     }
 
@@ -5766,6 +5898,67 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// Playlist forms stay sized to their content even on a tall window.
+    #[test]
+    fn playlist_dialogs_stay_compact_on_tall_windows() {
+        for light in [false, true] {
+            for size in [egui::vec2(1280.0, 800.0), egui::vec2(720.0, 1600.0)] {
+                for edit in [false, true] {
+                    for busy in [false, true] {
+                        let (ctx, mut app) = accessible_app("compact-playlist-dialog");
+                        app.settings.theme = if light {
+                            crate::settings::ThemeChoice::Light
+                        } else {
+                            crate::settings::ThemeChoice::Dark
+                        };
+                        app.actions.push(Action::SettingsChanged);
+                        app.playlist_busy = busy;
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            ..Default::default()
+                        };
+                        // The same modal area has already shown a longer dialog.
+                        app.dialog = Some(Dialog::Shortcuts);
+                        for _ in 0..3 {
+                            let mut output = ctx.run_ui(input.clone(), |ui| app.frame_ui(ui));
+                            output.textures_delta.clear();
+                        }
+                        app.dialog = None;
+                        let mut output = ctx.run_ui(input.clone(), |ui| app.frame_ui(ui));
+                        output.textures_delta.clear();
+                        app.dialog = Some(if edit {
+                            Dialog::EditPlaylist {
+                                id: "pl1".into(),
+                                name: "Long Way Home".into(),
+                                description: "Songs for the road".into(),
+                                public: Some(false),
+                                cover: Default::default(),
+                            }
+                        } else {
+                            Dialog::CreatePlaylist {
+                                name: "Peak Masculinity".into(),
+                                public: false,
+                                add_uris: vec!["spotify:track:trk1".into()],
+                            }
+                        });
+                        for _ in 0..3 {
+                            let mut output = ctx.run_ui(input.clone(), |ui| app.frame_ui(ui));
+                            output.textures_delta.clear();
+                        }
+                        let dialog = app.dialog_rect.expect("playlist dialog");
+                        let limit = if edit { 600.0 } else { 360.0 };
+                        assert!(
+                            dialog.height() <= limit,
+                            "edit={edit}, busy={busy}, light={light}, size={size:?}: {dialog:?}"
+                        );
+                        assert!(dialog.top() >= 0.0 && dialog.bottom() <= size.y);
+                        app.backend.shutdown();
+                    }
+                }
+            }
+        }
+    }
+
     /// Rule: the interface zoom control puts minus on the left and plus
     /// on the right. The setting row's control is right-to-left, which
     /// used to reverse the two buttons.
@@ -6944,6 +7137,34 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// A paused context keeps the play glyph, and pressing it resumes where
+    /// the song was instead of starting the context over.
+    #[test]
+    fn clicking_the_cover_of_the_paused_playlist_resumes() {
+        let (ctx, mut app) = accessible_app("sidebar-cover-resume");
+        // The demo's remote snapshot plays "Late night focus"; pause it.
+        app.remote.as_mut().unwrap().state.is_playing = false;
+        let view = crate::ui::sidebar::show;
+        view_frame(&ctx, &mut app, vec![], view);
+        let painted = view_frame(&ctx, &mut app, vec![], view);
+        let name = sidebar_text(&painted, "Late night focus");
+        let cover = egui::pos2(name.left() - 34.0, name.center().y + 9.0);
+        app.actions.clear();
+        let [click, _] = double_click(cover);
+        view_frame(&ctx, &mut app, click, view);
+        assert!(
+            app.actions
+                .iter()
+                .any(|action| matches!(action, Action::TogglePlay)),
+            "the paused playlist's cover resumes"
+        );
+        assert!(
+            played_contexts(&app).is_empty(),
+            "the paused playlist must not be started over"
+        );
+        app.backend.shutdown();
+    }
+
     /// The cover and title in the bottom-left player are a song source, not
     /// just links. The sidebar can therefore receive the same complete row it
     /// receives when a table song is dragged.
@@ -7276,6 +7497,92 @@ mod tests {
             app.manual_queue,
             vec![uris[1].clone(), uris[2].clone(), uris[0].clone()],
             "moved, not duplicated"
+        );
+        app.backend.shutdown();
+    }
+
+    /// Right-clicking a song under Playing next offers to take it out of
+    /// the queue, and doing so removes that row; a Next up row, which
+    /// plays from the context, offers no such entry (#721).
+    #[test]
+    fn a_queued_rows_menu_removes_it_from_the_queue() {
+        use egui::accesskit::Role;
+        let (ctx, mut app) = accessible_app("queue-remove");
+        app.show_queue_panel = true;
+        let uris = seed_queued_songs(&mut app);
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        // The queue panel's own row: some of its songs are also on the
+        // page behind it, and the panel opens against the right edge.
+        let row_center = |tree: &egui::accesskit::TreeUpdate, name: &str| {
+            let prefix = format!("Play {name},");
+            let bounds = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::Button
+                        && node.label().is_some_and(|text| text.starts_with(&prefix))
+                        && node
+                            .bounds()
+                            .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
+                })
+                .unwrap_or_else(|| panic!("missing queue row {name}"))
+                .1
+                .bounds()
+                .unwrap();
+            egui::pos2(
+                ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                ((bounds.y0 + bounds.y1) / 2.0) as f32,
+            )
+        };
+        let has_remove = |tree: &egui::accesskit::TreeUpdate| {
+            tree.nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Remove from queue"))
+        };
+
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let next_up = row_center(&tree, "Otomo");
+        accessible_frame(
+            &ctx,
+            &mut app,
+            pointer_click(next_up, egui::PointerButton::Secondary),
+        );
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        accessible_node(&tree, "Add to queue", Role::Button);
+        assert!(!has_remove(&tree), "a Next up row cannot be removed");
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![keyboard(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let queued = row_center(&tree, "Queued 1");
+        accessible_frame(
+            &ctx,
+            &mut app,
+            pointer_click(queued, egui::PointerButton::Secondary),
+        );
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let remove = accessible_node(&tree, "Remove from queue", Role::Button);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(
+                remove,
+                egui::accesskit::Action::Click,
+                None,
+            )],
+        );
+        assert_eq!(app.manual_queue, [uris[0].clone(), uris[2].clone()]);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        assert!(
+            !tree.nodes.iter().any(|(_, node)| node
+                .label()
+                .is_some_and(|text| text.starts_with("Play Queued 1,"))),
+            "the removed row leaves the queue at once"
         );
         app.backend.shutdown();
     }

@@ -17,6 +17,12 @@ use crate::util;
 
 use super::widgets::{self, TrackRow};
 
+pub(super) enum Avatar {
+    /// The user placeholder, drawn when Spotify gives no picture.
+    Placeholder,
+    Url(String),
+}
+
 pub(super) struct Hero<'a> {
     pub images: HeroImages<'a>,
     pub liked: bool,
@@ -24,6 +30,9 @@ pub(super) struct Hero<'a> {
     pub title: &'a str,
     pub description: Option<String>,
     pub byline: Vec<(String, Option<Page>)>,
+    /// The owner's picture, drawn before the byline's first entry. A hero
+    /// without an owner, an album or an artist say, draws nothing.
+    pub avatar: Option<Avatar>,
     pub round: bool,
 }
 
@@ -35,26 +44,46 @@ pub(super) struct HeroImages<'a> {
     pub align_thumbnail: bool,
 }
 
+/// The larger of the hero's two cover sizes.
+const HERO_ART: f32 = 212.0;
+
+/// The artwork widths a page header asks for on this display: its own
+/// cover, and the card's, which the page was likely opened from and so is
+/// already loaded.
+#[derive(Clone, Copy)]
+pub(super) struct HeroArt {
+    pub hero: u32,
+    pub card: u32,
+}
+
+impl HeroArt {
+    pub fn of(app: &App) -> Self {
+        Self {
+            hero: app.art_px(HERO_ART),
+            card: app.art_px(widgets::CARD_ART),
+        }
+    }
+}
+
 pub(super) fn hero_images<'a>(
     images: &'a [Image],
     preview: Option<&'a [Image]>,
     align_thumbnail: bool,
+    art: HeroArt,
 ) -> HeroImages<'a> {
-    let image = pick_image(images, 640);
+    let image = pick_image(images, art.hero);
+    let thumbnail = crate::api::models::SMALL_ART_WIDTH;
     HeroImages {
         image,
         previous: image.and_then(|image| {
             preview
-                .and_then(|images| pick_image(images, 640))
+                .and_then(|images| pick_image(images, art.card))
                 .filter(|previous| *previous != image)
-                .or_else(|| {
-                    pick_image(images, super::GRID_ART_TARGET_WIDTH)
-                        .filter(|smaller| *smaller != image)
-                })
+                .or_else(|| pick_image(images, art.card).filter(|smaller| *smaller != image))
         }),
         thumbnail: image
-            .and_then(|_| preview.and_then(|images| pick_image(images, 64)))
-            .or_else(|| pick_image(images, 64)),
+            .and_then(|_| preview.and_then(|images| pick_image(images, thumbnail)))
+            .or_else(|| pick_image(images, thumbnail)),
         align_thumbnail,
     }
 }
@@ -68,7 +97,7 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
         .and_then(|uri| app.softened_covers.texture(ui.ctx(), &art, uri));
     ui.add_space(12.0);
     let cover_size = if ui.available_width() > 720.0 {
-        212.0
+        HERO_ART
     } else {
         160.0
     };
@@ -127,6 +156,23 @@ pub(super) fn hero(app: &mut App, ui: &mut egui::Ui, hero: Hero<'_>) {
             }
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                if let Some(avatar) = &hero.avatar {
+                    let size = 18.0;
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+                    let url = match avatar {
+                        Avatar::Placeholder => None,
+                        Avatar::Url(url) => Some(url.as_str()),
+                    };
+                    widgets::paint_cover(
+                        ui,
+                        &palette,
+                        url,
+                        rect,
+                        size / 2.0,
+                        Icon::User,
+                        Some(&art),
+                    );
+                }
                 for (index, (text, page)) in hero.byline.iter().enumerate() {
                     if index > 0 {
                         theme::text(ui, "•", theme::regular(13.5), palette.secondary);
@@ -178,8 +224,8 @@ pub fn actions_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
         if let Some(uri) = &actions.play_uri {
-            let now_playing_here = app.playing_context_uri().as_deref() == Some(uri.as_str())
-                && app.believed_playing();
+            let context_here = app.playing_context_uri().as_deref() == Some(uri.as_str());
+            let now_playing_here = context_here && app.believed_playing();
             let is_filtered = filter.as_ref().is_some_and(|f| !f.trim().is_empty());
             // A radio is mixed afresh each time Spotify is asked, so it
             // always plays the songs on screen.
@@ -200,7 +246,7 @@ pub fn actions_row(
                     &gettext(locale, "Starting…"),
                 );
             } else if ui
-                .add_enabled_ui(now_playing_here || can_start, |ui| {
+                .add_enabled_ui(context_here || can_start, |ui| {
                     theme::circle_button(
                         ui,
                         icon,
@@ -219,7 +265,9 @@ pub fn actions_row(
                 .on_disabled_hover_text(gettext(locale, "No playable songs in this view").as_ref())
                 .clicked()
             {
-                if now_playing_here {
+                // The context this page belongs to resumes where it was,
+                // paused or playing; only another context starts over.
+                if context_here {
                     app.actions.push(Action::TogglePlay);
                 } else if let Some(uris) = actions.view.clone()
                     && play_view
@@ -794,7 +842,7 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 Some(_) => 4.0,
                 None => 0.0,
             },
-            0.12,
+            crate::motion::seconds(ui.ctx(), 0.12),
         );
         let (response, asked) = widgets::track_row_response(
             ui,
@@ -1474,7 +1522,10 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let owner_id = playlist.owner.id.as_deref();
             let others = other_adders(owner_id, &page.contributors, &user_id);
             let made_together = playlist.collaborative || !others.is_empty();
-            let mut byline = vec![(playlist.owner_name().to_string(), None)];
+            let mut byline = vec![(owner_name(app, playlist).to_string(), None)];
+            if let Some(saves) = playlist.followers.as_ref().map(|followers| followers.total) {
+                byline.push((saves_text(app.locale, saves), None));
+            }
             if !others.is_empty() {
                 let named: Vec<String> = others
                     .iter()
@@ -1494,6 +1545,7 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     .as_deref()
                     .map(|playlist| playlist.images.as_slice()),
                 false,
+                HeroArt::of(app),
             );
             // A Blend is made together, but only Spotify writes to it, so it
             // is no collaborative playlist anyone could add to.
@@ -1629,6 +1681,11 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
     let Some(page) = app.album_pages.remove(id) else {
         return;
     };
+    if let Some(data) = &page.prerelease {
+        super::prerelease::show(app, ui, data);
+        app.album_pages.insert(id.to_string(), page);
+        return;
+    }
     let preview =
         super::loading_preview(ui.ctx(), id, &page.album, || app.known_album(id).cloned());
     let palette = app.palette;
@@ -1817,8 +1874,8 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
 }
 
 fn playlist_loading_hero(app: &mut App, ui: &mut egui::Ui, playlist: &Playlist) {
-    let images = hero_images(&playlist.images, None, false);
-    let mut byline = vec![(playlist.owner_name().to_string(), None)];
+    let images = hero_images(&playlist.images, None, false, HeroArt::of(app));
+    let mut byline = vec![(owner_name(app, playlist).to_string(), None)];
     let count = playlist.track_total();
     if count > 0 {
         byline.push((song_count(app.locale, count), None));
@@ -1834,6 +1891,20 @@ fn playlist_hero<'a>(
     byline: Vec<(String, Option<Page>)>,
     collaborative: bool,
 ) {
+    // The slot always shows: the official app draws the placeholder circle
+    // as soon as the page opens, before (and instead of) a picture.
+    let avatar = Some(
+        match playlist
+            .owner
+            .id
+            .as_deref()
+            .and_then(|id| app.user_images.get(id))
+            .and_then(|image| image.as_deref())
+        {
+            Some(url) => Avatar::Url(url.to_string()),
+            None => Avatar::Placeholder,
+        },
+    );
     hero(
         app,
         ui,
@@ -1850,6 +1921,7 @@ fn playlist_hero<'a>(
             title: &playlist.name,
             description: playlist.description.as_deref().map(util::strip_html),
             byline,
+            avatar,
             round: false,
         },
     );
@@ -1964,6 +2036,7 @@ fn album_hero(
         &album.images,
         preview.map(|album| album.images.as_slice()),
         true,
+        HeroArt::of(app),
     );
     hero(
         app,
@@ -1975,6 +2048,7 @@ fn album_hero(
             title: &album.name,
             description: None,
             byline,
+            avatar: None,
             round: false,
         },
     );
@@ -2061,6 +2135,7 @@ pub fn liked(app: &mut App, ui: &mut egui::Ui) {
             title: &liked_title,
             description: None,
             byline: vec![(user, None), (count_text, None)],
+            avatar: None,
             round: false,
         },
     );
@@ -2151,6 +2226,18 @@ fn song_count(locale: Locale, count: u32) -> String {
     .replace("{count}", &util::format_count(count as u64))
 }
 
+/// `1,845,680 saves`, from the follower count Spotify's playlist view gives.
+fn saves_text(locale: Locale, total: u64) -> String {
+    ngettext(
+        locale,
+        // Translators: {count} is the number of people who saved a playlist.
+        "{count} save",
+        "{count} saves",
+        u32::try_from(total).unwrap_or(u32::MAX),
+    )
+    .replace("{count}", &util::format_count(total))
+}
+
 /// `1,234 songs, 2 hr 13 min` once the whole list is known.
 pub(super) fn songs_and_duration(locale: Locale, count: u32, duration_ms: u64) -> String {
     ngettext(
@@ -2171,6 +2258,21 @@ const SPOTIFY_USER: &str = "spotify";
 
 fn spotify_owned(owner_id: Option<&str>) -> bool {
     owner_id == Some(SPOTIFY_USER)
+}
+
+/// The owner's name for a playlist's byline. A header read over the
+/// streaming session carries only the owner's id, so the name the profile
+/// lookup found stands in before the id does.
+fn owner_name<'a>(app: &'a App, playlist: &'a Playlist) -> &'a str {
+    playlist
+        .owner
+        .display_name
+        .as_deref()
+        .or_else(|| {
+            let id = playlist.owner.id.as_deref()?;
+            app.user_names.get(id)?.as_deref()
+        })
+        .unwrap_or_else(|| playlist.owner_name())
 }
 
 /// Who besides the owner added songs to a playlist, from the adders seen
@@ -2262,6 +2364,12 @@ mod tests {
     use crate::api::models::{Album, ArtistRef, Image, Track};
     use crate::model::PlaylistPage;
 
+    /// A 2x display: the hero asks for 640, a card for 300.
+    const TEST_HERO_ART: HeroArt = HeroArt {
+        hero: 640,
+        card: 300,
+    };
+
     fn adders(ids: &[&str]) -> std::collections::BTreeSet<String> {
         ids.iter().map(|id| (*id).to_string()).collect()
     }
@@ -2272,6 +2380,32 @@ mod tests {
         assert_eq!(other_adders(Some("ana"), &seen, "ana"), vec!["bea"]);
         assert_eq!(other_adders(Some("ana"), &seen, "carl"), vec!["bea"]);
         assert!(other_adders(Some("ana"), &adders(&["ana"]), "ana").is_empty());
+    }
+
+    /// A header read over the session names its owner only by id; once
+    /// the profile lookup answers, the byline says who it is.
+    #[test]
+    fn the_byline_names_an_owner_the_lookup_found() {
+        use crate::api::models::Owner;
+        let mut app = test_app();
+        let mut playlist = Playlist {
+            owner: Owner {
+                id: Some("alice-id".into()),
+                ..Default::default()
+            },
+            ..Playlist::default()
+        };
+        assert_eq!(owner_name(&app, &playlist), "alice-id");
+        app.set_user_name("alice-id".into(), Some("Alice".into()));
+        assert_eq!(owner_name(&app, &playlist), "Alice");
+        playlist.owner.display_name = Some("Alice Smith".into());
+        assert_eq!(owner_name(&app, &playlist), "Alice Smith");
+    }
+
+    #[test]
+    fn saves_read_as_the_playlist_view_counts_them() {
+        assert_eq!(saves_text(Locale::English, 1_845_680), "1,845,680 saves");
+        assert_eq!(saves_text(Locale::English, 1), "1 save");
     }
 
     #[test]
@@ -2331,6 +2465,7 @@ mod tests {
             loaded.get().unwrap(),
             retained.as_deref().map(Vec::as_slice),
             false,
+            TEST_HERO_ART,
         );
         assert_eq!(images.image, Some("current-large"));
         assert_eq!(images.previous, Some("preview-large"));
@@ -2340,7 +2475,7 @@ mod tests {
             "another page must not inherit the retained cover"
         );
 
-        let images = hero_images(&current, Some(&current), false);
+        let images = hero_images(&current, Some(&current), false, TEST_HERO_ART);
         assert_eq!(images.previous, None, "the same cover is not loaded twice");
 
         let with_grid_art = vec![
@@ -2348,12 +2483,22 @@ mod tests {
             image("current-grid", 300),
             image("current-small", 64),
         ];
-        let images = hero_images(&with_grid_art, None, false);
+        let images = hero_images(&with_grid_art, None, false, TEST_HERO_ART);
         assert_eq!(images.image, Some("current-large"));
         assert_eq!(images.previous, Some("current-grid"));
         assert_eq!(images.thumbnail, Some("current-small"));
 
-        let images = hero_images(&[], Some(&preview), false);
+        // At 100% the hero's 212 points and a card's 148 both fit the 300
+        // pixel rendition, so the page shows the card's own cover at once.
+        let one_x = HeroArt {
+            hero: 212,
+            card: 148,
+        };
+        let images = hero_images(&with_grid_art, Some(&with_grid_art), false, one_x);
+        assert_eq!(images.image, Some("current-grid"));
+        assert_eq!(images.previous, None);
+
+        let images = hero_images(&[], Some(&preview), false, TEST_HERO_ART);
         assert_eq!(images.image, None);
         assert_eq!(
             images.previous, None,

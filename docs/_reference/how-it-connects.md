@@ -14,14 +14,34 @@ local playback:
    catalog, catalogue search, playlist creation, and owned or collaborative
    playlist requests without using the shared app's quota. Complete
    playlist-library views and the playlist half of a search stay on the shared
-   app so Spotify-owned results are not filtered out. Both Web API grants must
+   app so Spotify-owned results are not filtered out. Home's **Made for you**
+   shelf first reads the account's actual personalized section over the
+   playback session. Only if that read fails does it try four shared-app
+   playlist searches as an approximate fallback. Both Web API grants must
    verify as the same Spotify account.
 3. **Local playback** uses
    [librespot](https://github.com/librespot-org/librespot). It needs one more
    browser approval and keeps an independent reusable credential. Spotify Premium
    is required. While it is signed in, its session also reads the playlists
    the shared app would otherwise be asked for: other people's, and the
-   account's own when there is no personal app. Radio pages come only from
+   account's own when there is no personal app. The personalized Made for you
+   shelf needs this active session and a verified Web API grant, preferably
+   personal. Spotify's private Home request receives the Web API access token as
+   its `sp_t` context and the session's Login5 bearer and client token as
+   headers. No token is logged
+   or persisted for this shelf. Its response is kept in memory for ten minutes
+   per account. Visible cards are also saved in the account-scoped Home cache
+   for the next start and removed on sign-out. A manual refresh bypasses the
+   in-memory cache but respects any
+   `Retry-After` cooldown. A failed refresh keeps previously shown cards.
+   If the Home read fails or playback is not set up, the shared Web API searches
+   Spotify-owned playlists named Discover Weekly, Release Radar, Daily Mix,
+   and daylist. The shelf keeps its **Made for you** heading, although search
+   cannot recover the account's Home ordering or every personalized card.
+   When playback becomes ready after Home, the personalized read is retried
+   while existing cards stay visible. Shared rate limits can still prevent
+   this fallback from loading. This
+   private response can change without notice. Radio pages come only from
    this session: the Web API has no stations. Opening one resolves the
    station and reads its songs' details in one batched request.
 
@@ -29,7 +49,9 @@ Local playback authorization stays separate from both Web API grants. Its
 browser approval requests only the streaming permission and always shows the
 consent dialog. The playback session uses the account ID verified by either
 Web API grant. A verified personal app can complete sign-in while the shared
-app's verification is still waiting.
+app's verification is still waiting. That verification keeps retrying in the
+background through rate limits without showing the top bar's "Waiting for
+Spotify" spinner, since nothing on screen waits for it.
 
 Web API sign-in opens the browser only after its local callback port is available. If
 port 8989 is occupied, the sign-in screen keeps the error visible. Close the
@@ -154,17 +176,23 @@ current-track pickup.
   album, and length to [lrclib.net](https://lrclib.net). It also checks
   api.github.com once a day for updates. You can turn off automatic checks in
   Settings, or request one there at any time. On macOS, **Check for Updates**
-  is also in the application menu.
+  is also in the application menu. On a connection the system reports as
+  metered (Windows), the daily check, automatic downloads, and the large cover
+  the media controls show wait for one that is not; a check by hand still
+  runs. On macOS, the daily check and automatic downloads also wait while the
+  system reports no internet connection.
 
   On Windows, macOS, and Linux, downloading an update fetches release metadata and
-  `checksums.txt` from the project's GitHub release, then the matching binary
-  archive, Windows installer, or universal macOS DMG. Spotifast checks the published SHA-256 digest
-  and the portable executable's reported version before offering a restart.
+  `checksums.txt` and `checksums.txt.sig` from the project's GitHub release. It
+  verifies the manifest's Ed25519 signature against its embedded publisher key
+  before downloading the matching binary archive, Windows installer, or universal
+  macOS DMG. Spotifast then checks the published SHA-256 digest and the portable
+  executable's reported version before offering a restart.
   Automatic downloads are optional; installation always waits for your click.
   Checks and downloads do not open the update popup. The green update pill opens
   it on request; closing the popup does not cancel a download.
-  No Spotify credential is sent. These are GitHub-hosted checksums, not a
-  separate publisher signature.
+  No Spotify credential is sent. Missing or invalid publisher signatures are
+  rejected; the updater does not fall back to trusting unsigned checksums.
 
   Updates stage their files in a private `.spotifast-update-*` directory beside
   the application so replacement stays on the same filesystem. The directory
@@ -188,12 +216,14 @@ indicator marks the unfinished content. If the request fails, the known header
 stays above **Retry**. A direct link with no known details shows only the normal
 loading or error state.
 
-Visible library grid cards use the closest 300-pixel artwork URL already
-present in Spotify metadata. Larger collection cards and page headers use the
-closest 640-pixel URL. Compact rows, page tint extraction, and softened loading
-previews use 64-pixel thumbnails. These URLs remain unchanged and follow the
-configured proxy and normal artwork cache. Choosing an artwork size and reusing
-known details add no Web API request.
+Each cover uses the smallest artwork URL already present in Spotify metadata
+with at least a quarter more pixels than the cover takes on the display.
+Spotify's 64-pixel thumbnail serves only covers of 32 pixels or less, so at
+100% scaling library rows, cards and page headers use the 300-pixel URL, and
+from 125% page headers use the 640-pixel one, as cards do from 200%. Page tint
+extraction and softened loading previews use 64-pixel thumbnails. These URLs
+remain unchanged and follow the configured proxy and normal artwork cache.
+Choosing an artwork size and reusing known details add no Web API request.
 
 A ready sharp cover stays visible until its replacement is ready. A 300-pixel
 grid cover already loaded for the same item can preview a larger page cover
@@ -218,7 +248,7 @@ song details Spotify did not supply in full, hands the read to the Web API
 instead of caching rows without songs. A song Spotify no longer has, or
 withholds for legal reasons, is an empty row, as the Web API shows it.
 
-The playlist list and Made for you searches go through the shared app even
+The playlist list and fallback Made for you searches go through the shared app even
 when a personal app is set up. While the shared app waits out Spotify's
 limits, the sidebar and Home show what they last showed for the account,
 from the cache described in [Settings & Files](/settings-and-files/).
@@ -254,8 +284,8 @@ existing playlist requests and adds no periodic polling.
 Since 0.10.0, Home's **Your podcasts** shelf reads the first page of
 saved shows, the same request the library's Podcasts shelf makes, if it has
 not been read yet. It then asks for the five newest episodes of each of the
-eight most recently saved shows, one show at a time, through the normal
-personal/shared app routing. Spotify includes each episode's resume point in
+eight most recently saved shows, all at once within the Web API session's
+concurrency limit, through the normal personal/shared app routing. Spotify includes each episode's resume point in
 those answers. Play uses that position so an in-progress episode continues
 rather than starting over. Shows known to be audiobooks are not asked for. These requests
 run when Home refreshes: on opening Home, at most once every ten minutes, and
@@ -359,6 +389,41 @@ credential. Spotifast does not send a login blob or access token to that HTTP
 endpoint. Transfer and player commands go through Spotify using the existing
 playback session. Other receivers keep the encrypted login blob described above.
 
+## Google Cast devices
+
+Cast speakers, displays and speaker groups announce `_googlecast._tcp`, not
+`_spotify-connect._tcp`. They do not run Spotify until a sender starts it.
+Spotifast lists them under their Cast name (the `fn` record) without probing
+them, because probing one would start Spotify on it.
+
+Starting Spotify on a Cast device needs local playback enabled, because the
+playback session obtains the token. When a Cast device is selected, Spotifast
+follows the steps of Spotify's own apps:
+
+1. It opens a Cast v2 connection to the device and launches Spotify's Cast
+   receiver.
+2. The receiver's `getInfo` reply names the Spotify client it runs as.
+3. The librespot session asks Spotify for a token issued to that client and
+   to the device's ID (`/device-auth/v1/refresh`, an internal endpoint).
+4. Spotifast sends that token to the receiver with `addUser`.
+
+The device ID is the MD5 hash of the Cast name, as in Spotify's apps. The
+device then appears in Spotify's device list, and the Web API controls it
+like any other device. Right after an earlier sign-in, a receiver can
+refuse the first attempt, so Spotifast tries once more. A device that does
+not answer within 20 seconds is reported as not answering.
+
+Cast devices present certificates from Google's device CA, which system trust
+stores do not hold. Spotifast therefore accepts any certificate on this
+connection. It still checks the handshake signature against the certificate the
+device presents, so other machines that only listen cannot read the traffic,
+but nothing proves the device is a genuine Cast device: whatever answers at the
+address of the device you select receives the token. The connection only goes
+to a device found on the local network, as with the Spotify Connect receivers
+above. The token is issued for the Spotify client and device ID that the
+receiver names in its `getInfo` reply, not the reusable playback credential.
+Spotifast does not save or log the token.
+
 ## The engine
 
 Playback runs on a separate runtime. Librespot maintains the Spotify Connect
@@ -457,3 +522,23 @@ On startup, network work waits for the protected proxy password to be restored.
 That lookup runs on the credential worker and does not block the interface or
 shutdown. The password belongs to its host, port, and username; editing any of
 these fields clears it. See [password storage and migration](/settings-and-files/).
+
+## Upcoming albums and countdown links
+
+`spotify:prerelease:` and Spotify prerelease share links require the same-account
+local playback session. The session's extended metadata kind 138 resolves the
+prerelease URI to its real album URI, cover, artist and release instant. They
+are different IDs. Pathfinder `getAlbum` reads the ordered track preview and
+playability using Login5 and the client token through the existing configured
+HTTP client. These reads do not use the shared Web API quota. Hidden positions
+remain visible, and unavailable rows never enter playback or shuffle lists.
+
+Collection membership uses `/collection/v2/contains`. Pressing Pre-save or
+Pre-saved sends one explicit `/collection/v2/write` for the resolved album URI and
+then checks membership. Writes use the configured proxy with transport retries
+and redirects disabled. Opening the page never changes the library. Both use
+the existing session's authorization, with no new OAuth permissions or stored
+credentials. Failed confirmation leaves state unknown and offers a fresh read;
+it never automatically repeats a mutation. Requests have a 20-second deadline.
+Sign-out cancels work, stale session/page generations are ignored, and a new
+link or history navigation cannot be overwritten by an older response.

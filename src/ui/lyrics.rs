@@ -231,7 +231,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 let lit = ui.ctx().animate_bool_with_time(
                     egui::Id::new("lyric-line").with(index),
                     is_active,
-                    LIGHT_UP_SECONDS,
+                    crate::motion::seconds(ui.ctx(), LIGHT_UP_SECONDS),
                 );
                 let color = blend(quiet, palette.accent, lit);
                 let font = if lit > 0.5 {
@@ -474,14 +474,14 @@ fn big_cover(app: &App, ui: &mut egui::Ui, column: Rect, align: Align) {
         }
         .as_shape(cover, radius),
     );
-    widgets::paint_cover(
+    widgets::playing_cover(
         ui,
         &theme::Palette::dark(),
+        app.backend.art(),
+        "fullscreen-lyrics",
         now.art_url.as_deref().or(now.art_small.as_deref()),
         cover,
         radius,
-        Icon::Music,
-        Some(app.backend.art()),
     );
     let words = Rect::from_min_max(pos2(column.left(), cover.bottom() + 18.0), column.max);
     let mut text = ui.new_child(
@@ -597,14 +597,14 @@ fn track_heading(app: &App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let size = 52.0;
             let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-            widgets::paint_cover(
+            widgets::playing_cover(
                 ui,
                 &theme::Palette::dark(),
-                now.art_small.as_deref().or(now.art_url.as_deref()),
+                app.backend.art(),
+                "lyrics-heading",
+                app.small_art(&now, size),
                 rect,
                 4.0,
-                Icon::Music,
-                Some(app.backend.art()),
             );
             ui.vertical(|ui| {
                 ui.add(
@@ -702,7 +702,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
         });
     let following = app.lyrics_following && !manual_scroll;
     let follow = following && app.lyrics_line_shown != Some(active);
-    let animation = egui::style::ScrollAnimation::duration(0.45);
+    let animation = crate::motion::scroll(ui.ctx(), 0.45);
     let size = (ui.available_width() * 0.046).clamp(28.0, 42.0);
     // The line being sung brightens; all lines keep the same font metrics
     // so highlighting cannot rewrap the words during a transition.
@@ -739,7 +739,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 let lit = ui.ctx().animate_bool_with_time(
                     egui::Id::new("lyric-line").with(("fullscreen", &now.uri, index)),
                     is_active,
-                    0.3,
+                    crate::motion::seconds(ui.ctx(), 0.3),
                 );
                 let color = if lyrics.synced {
                     blend(quiet, palette.text, lit)

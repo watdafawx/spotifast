@@ -9,7 +9,7 @@ use crate::model::{Action, DiscographyFilter, Loadable, Page, RowContext};
 use crate::theme::{self, Icon};
 use crate::util;
 
-use super::collection::{Hero, hero, hero_images};
+use super::collection::{Hero, HeroArt, hero, hero_images};
 use super::widgets::{self, TrackRow};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
@@ -139,19 +139,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                                 album.year().unwrap_or(""),
                                 app.album_kind_label(album)
                             );
-                            let playing_here = app.playing_context_uri().as_deref()
-                                == Some(album.uri.as_str())
-                                && app.believed_playing();
+                            let context_here =
+                                app.playing_context_uri().as_deref() == Some(album.uri.as_str());
+                            let playing_here = context_here && app.believed_playing();
+                            let card_art = app.art_px(widgets::CARD_ART);
                             let card = widgets::card(
                                 ui,
                                 app,
-                                pick_image(&album.images, 640),
+                                pick_image(&album.images, card_art),
                                 &album.name,
                                 subtitle.trim_start_matches(" • "),
                                 widgets::CardCover::square(playing_here),
                             );
                             if card.play {
-                                if playing_here {
+                                if context_here {
                                     app.actions.push(Action::TogglePlay);
                                 } else {
                                     app.actions.push(Action::PlayContext {
@@ -214,19 +215,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 let title = gettext(locale, "Fans also like");
                 widgets::shelf(ui, &palette, "related", &title, |ui| {
                     for artist in related {
-                        let playing_here = app.playing_context_uri().as_deref()
-                            == Some(artist.uri.as_str())
-                            && app.believed_playing();
+                        let context_here =
+                            app.playing_context_uri().as_deref() == Some(artist.uri.as_str());
+                        let playing_here = context_here && app.believed_playing();
+                        let card_art = app.art_px(widgets::CARD_ART);
                         let card = widgets::card(
                             ui,
                             app,
-                            pick_image(&artist.images, 640),
+                            pick_image(&artist.images, card_art),
                             &artist.name,
                             &artist_label,
                             widgets::CardCover::portrait(playing_here),
                         );
                         if card.play {
-                            if playing_here {
+                            if context_here {
                                 app.actions.push(Action::TogglePlay);
                             } else {
                                 app.actions.push(Action::PlayContext {
@@ -344,6 +346,7 @@ fn artist_hero(app: &mut App, ui: &mut egui::Ui, artist: &Artist, preview: Optio
         &artist.images,
         preview.map(|artist| artist.images.as_slice()),
         false,
+        HeroArt::of(app),
     );
     hero(
         app,
@@ -355,6 +358,7 @@ fn artist_hero(app: &mut App, ui: &mut egui::Ui, artist: &Artist, preview: Optio
             title: &artist.name,
             description: None,
             byline,
+            avatar: None,
             round: true,
         },
     );

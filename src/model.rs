@@ -614,8 +614,15 @@ pub struct HomeData {
     pub top_songs_loading: bool,
     pub top_songs_complete: bool,
     pub recommendations: Loadable<Vec<Track>>,
-    pub discover: HashMap<String, Loadable<Vec<Playlist>>>,
-    pub discover_pending: HashMap<String, Loadable<Vec<Playlist>>>,
+    pub made_for_you: Loadable<Vec<Playlist>>,
+    /// Whether the displayed cards came from the personalized session route.
+    pub made_for_you_personalized: bool,
+    /// Independent request serial: playback readiness can supersede a fallback.
+    pub made_for_you_generation: u64,
+    /// One outstanding shelf answer counts toward the Home refresh.
+    pub made_for_you_loading: bool,
+    /// Whether playback was ready when the current shelf request began.
+    pub made_for_you_session_requested: bool,
     /// Saved podcasts with their newest episodes, in library order, for the
     /// podcast shelf. A refresh replaces them only once it answers.
     pub podcasts: Vec<(Show, Vec<Episode>)>,
@@ -656,12 +663,14 @@ pub struct HomeSnapshot {
     pub recently_played: Option<Vec<PlayHistory>>,
     pub top_artists: Option<Vec<Artist>>,
     pub top_tracks: Option<Vec<Track>>,
-    /// Made for you, by search term, for the searches that answered.
+    /// The ordered shelf and its origin, retained across restarts.
+    pub made_for_you: Option<Vec<Playlist>>,
+    pub made_for_you_personalized: bool,
+    /// Legacy search shelves, read for compatibility with older cache files.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub discover: std::collections::BTreeMap<String, Vec<Playlist>>,
     pub podcasts: Vec<(Show, Vec<Episode>)>,
 }
-
-pub const DISCOVER_TERMS: &[&str] = &["Discover Weekly", "Release Radar", "Daily Mix", "daylist"];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SearchFilter {
@@ -796,6 +805,7 @@ pub struct PlaylistCachePending {
 pub struct AlbumPage {
     pub generation: u64,
     pub album: Loadable<Album>,
+    pub prerelease: Option<crate::prerelease::Prerelease>,
     pub tracks: PagedList<Track>,
 }
 
@@ -1009,6 +1019,20 @@ pub enum Action {
         offset_uri: Option<String>,
         offset_index: Option<u32>,
     },
+    /// Search one kind of thing and play the best match, as
+    /// `spotifast play-search` asks. Queued like the other play actions so
+    /// it takes precedence in the order it was asked for.
+    PlaySearch {
+        kind: String,
+        query: String,
+    },
+    /// The match a play-search found, played only if nothing has taken
+    /// precedence since: a newer play queued in the same frame as the
+    /// answer must still win.
+    PlaySearchMatch {
+        uri: String,
+        serial: u64,
+    },
     /// Play one episode, from `resume_ms` when the row, card or button
     /// that asked showed it as started.
     PlayEpisode {
@@ -1061,6 +1085,13 @@ pub enum Action {
     InsertInQueue {
         items: Vec<PlayableItem>,
         position: usize,
+    },
+    /// Take rows out of the manually queued "Playing next" section, each
+    /// named by its index in the queue and the song it holds there. Only
+    /// applied while the local player is the active target; see
+    /// [`crate::app::App::queue_locally_reorderable`].
+    RemoveFromQueue {
+        rows: Vec<(usize, String)>,
     },
     /// Set saved state for several songs explicitly.
     SetSavedMany {
@@ -1131,6 +1162,10 @@ pub enum Action {
     },
     /// Open a web page in the browser.
     OpenUrl(String),
+    SetPrereleaseSaved {
+        uri: String,
+        saved: bool,
+    },
     OpenInSpotify(String),
     Search(String),
     /// The search field was emptied or its selection typed over, so the
@@ -1182,6 +1217,7 @@ pub enum Action {
     OpenThemesFolder,
     SetCustomTheme(String),
     ReloadThemes,
+    SetLibraryByYou(bool),
     SetLibrarySort {
         shelf: crate::settings::LibraryShelf,
         sort: crate::settings::LibrarySort,

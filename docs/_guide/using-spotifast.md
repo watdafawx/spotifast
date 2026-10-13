@@ -7,12 +7,17 @@ nav_order: 3
 
 ## Middle-click autoscroll
 
-On Windows, since 0.8.0, and on Linux once turned on, middle-click a scrolling
-list or its empty background, then move the pointer away from the starting
-point. That list follows the pointer, faster as the distance grows. Moving across another pane keeps the original list in control.
+On Windows, since 0.8.0, and on Linux once turned on, middle-click anywhere
+in a scrolling list, then move the pointer away from the starting point. That
+list follows the pointer, faster as the distance grows, and the pointer shows
+the direction it is scrolling. Speed and dead zone match Chromium's
+autoscroll. Moving across another pane keeps the original list in control.
 A small dead zone prevents an ordinary middle-click from moving the view.
-Click again, press Esc, turn the wheel, or switch to another window to stop.
-Buttons and text fields keep their normal middle-click behavior.
+You can also hold the middle button while moving and release it to stop.
+Otherwise click again, press Esc, turn the wheel, or switch to another window
+to stop.
+Text fields keep middle-click paste, and sliders and scroll bars keep their
+own dragging.
 
 This works automatically on Windows, with no setting to enable. On Linux, turn
 on **Middle-click autoscroll** under **Settings > Appearance**. It is off by
@@ -20,6 +25,15 @@ default, because Linux desktops usually paste the primary selection on middle
 click. macOS retains its existing middle-click behavior.
 
 ## Scrolling shelves
+
+**Made for you** shows the personalized playlist cards Spotify returns for
+your account, in Spotify's order, when local playback and a current Web API
+Home grant for that playback account are available. If local playback is
+unavailable, the session read fails, or the grant check fails, the same shelf
+shows approximate matches found through the shared Web API. Shared access can
+be rate-limited. If a refresh fails, cards already on screen remain available;
+**Retry** is shown when the first load fails. Spotify DJ is left out because
+Spotifast cannot play its special context.
 
 Point at a horizontal shelf, such as Made for you or Recently played on
 Home, and hold `Shift` while turning the mouse wheel. The shelf moves while
@@ -258,10 +272,15 @@ spotifast seek -- -15         spotifast like
 spotifast seek-to 90          spotifast play-uri spotify:playlist:37i9…
 spotifast show                spotifast transfer <device-id>
 spotifast now-playing [--raw] spotifast devices [--raw]
+spotifast play-search <words> spotifast play-search --kind artist <name>
 ```
 
 `shuffle` and `repeat` toggle when used without an argument. Pass a state to
 set it directly. `like` adds or removes the playing track from your library.
+
+`play-search` searches Spotify and plays the best match: a song, or with
+`--kind album`, `artist`, or `playlist`, one of those from the start. It shows
+a message instead when nothing matches.
 
 `now-playing` prints one readable line. `--raw` prints tab-separated fields:
 state, title, artists, album, position_ms, duration_ms, volume, shuffle,
@@ -305,6 +324,15 @@ installations, the AppImage among them, use the [Download page](/download/).
 Portable archives identify themselves with `spotifast-portable.txt`.
 
 ## Library order
+
+Select **By You** under Playlists to show only playlists owned by your signed-in
+account, alongside Liked Songs. Followed playlists and collaborative playlists
+owned by someone else are hidden, including pinned ones. Search and the selected
+sort still apply. Matching playlists appear in a flat list, including those in
+collapsed folders. Turn By You off to restore the full list and folder view.
+The choice is remembered on this computer and only affects the Playlists shelf.
+It uses the ownership information already loaded with your library and makes no
+additional Spotify requests.
 
 Since 0.8.0, the menu below the Library filters selects an order
 for each section. **Name** and **Recently played** are available throughout.
@@ -354,6 +382,12 @@ rate while Spotifast's window is out of focus or the system saves energy, and
 not at all while nobody can see the window: minimised, in the tray, with the
 display off or the screen locked. Disable **Click player bar to change
 visualizer** in **Settings > Appearance** to prevent accidental changes.
+
+Spotifast follows the system when it asks for less motion: **Animation
+effects** turned off in Windows, **Reduce motion** on macOS, or GNOME's
+**Animations** turned off. Its animations then show where they end at once:
+the player bar's colour changes without fading, lyrics jump to the sung line,
+and a new theme replaces the old one without the reveal. Spinners still turn.
 
 In **Settings > Appearance**, **Compact track list** puts each song on one
 line. In narrow lists, the added date follows the artist credits with a spaced
@@ -463,6 +497,12 @@ On Windows, the main window's minimize, maximize, and close buttons share the
 top bar with Spotifast's controls. Drag an empty part of that bar to move or
 snap the window, and drag a window edge or corner to resize it.
 
+## Google Cast playback
+
+Google Cast speakers and speaker groups appear in the device picker. Enable
+local playback first, then select the speaker. Spotifast starts Spotify on it,
+and the speaker then plays like any other Spotify Connect device.
+
 ## Radio
 
 Since 0.10.0, **Go to song radio** in a song's menu opens a page
@@ -478,6 +518,18 @@ after the radio with the songs on the page.
 
 Radio comes from Spotify's playback service, so it needs playback on this
 computer to be set up; the page can then play on any device.
+
+## Upcoming albums
+
+Open a `spotify:prerelease:` URI or an `open.spotify.com/prerelease/` link
+with Spotifast to see the artwork, release countdown and track-list preview.
+This requires local playback authorization. Pre-save adds the resolved album
+to your Spotify library and confirms its saved state. Unavailable preview
+tracks cannot start playback.
+
+The browser's **Open in app** action uses the registered `spotify:` handler.
+Pasting an HTTPS address into the browser opens Spotify's website; Spotifast
+does not take over HTTP or HTTPS associations.
 
 ## Playlist covers
 
