@@ -12,6 +12,12 @@
 #
 # Needs the CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`); it is
 # used only when a merge conflicts.
+#
+# Needs the SYNC_TOKEN secret whenever upstream changes .github/workflows/:
+# GitHub refuses a push touching workflow files from GITHUB_TOKEN, and no
+# `permissions:` entry lifts that. Use a fine-grained personal access token
+# for this repository with Contents and Workflows set to read and write.
+# Without it the jobs fall back to GITHUB_TOKEN, which covers every other sync.
 name: Sync upstream
 
 on:
@@ -33,6 +39,7 @@ jobs:
         with:
           ref: mods
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - name: Merge upstream
         id: merge
@@ -59,7 +66,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # It rewrites the remote with this token; keep the one the push needs.
+          github_token: ${{ secrets.SYNC_TOKEN || github.token }}
           claude_args: >-
             --max-turns 80
             --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git add:*)"
@@ -128,6 +136,7 @@ jobs:
         with:
           ref: sync/upstream
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - name: Build and test
         run: |
