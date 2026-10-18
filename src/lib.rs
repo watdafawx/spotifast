@@ -13,6 +13,7 @@ pub mod cast;
 pub mod credentials;
 #[cfg(any(test, feature = "demo"))]
 pub mod demo;
+pub mod device_history;
 pub mod emoji;
 pub mod eq;
 pub mod history;
@@ -37,6 +38,7 @@ pub mod model;
 #[cfg(feature = "mods")]
 pub mod mods;
 pub mod motion;
+pub mod new_releases;
 pub mod notch;
 pub mod opener;
 pub mod paths;
