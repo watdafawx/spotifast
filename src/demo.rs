@@ -1264,10 +1264,18 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "local-files" => {
                 demo_local_rows(app);
                 app.settings.local_files_folder = Some("/home/you/Music".into());
-                let mut uris: std::collections::HashSet<String> = (0..127)
-                    .map(|n| format!("spotify:local:Demo:Demo:Song+{n}:180"))
+                let mut uris: std::collections::HashMap<String, std::path::PathBuf> = (0..127)
+                    .map(|n| {
+                        (
+                            format!("spotify:local:Demo:Demo:Song+{n}:180"),
+                            format!("/home/you/Music/Song {n}.mp3").into(),
+                        )
+                    })
                     .collect();
-                uris.insert(crate::app::local_file_key(DEMO_LOCAL_FOUND));
+                uris.insert(
+                    crate::app::local_file_key(DEMO_LOCAL_FOUND),
+                    "/home/you/Music/Kitchen Demo.mp3".into(),
+                );
                 app.local_files = Some(("/home/you/Music".into(), std::sync::Arc::new(uris)));
             }
             "rtl" => {
@@ -1300,6 +1308,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 });
             }
             "personal-app" => app.dialog = Some(Dialog::PersonalAppIntro),
+            "slow-banner" => app.slow_banner = true,
             "many-devices" => {
                 app.show_devices = true;
                 app.devices.extend((0..40).map(|index| Device {
@@ -3230,6 +3239,41 @@ mod tests {
     }
 
     #[test]
+    fn slow_banner_closes_or_opens_personal_app_setup() {
+        use egui::accesskit::{Action as AccessibleAction, Role};
+
+        for setup in [false, true] {
+            let (ctx, mut app) = accessible_app(&format!("slow-banner-{setup}"));
+            app.slow_banner = true;
+            accessible_frame(&ctx, &mut app, vec![]);
+            let tree = accessible_frame(&ctx, &mut app, vec![]);
+            let button = accessible_node(
+                &tree,
+                if setup {
+                    "Set up personal app"
+                } else {
+                    "Close banner"
+                },
+                Role::Button,
+            );
+            accessible_frame(
+                &ctx,
+                &mut app,
+                vec![accessible_action(button, AccessibleAction::Click, None)],
+            );
+            assert!(!app.slow_banner);
+            assert!(app.dialog.is_none());
+            if setup {
+                assert_eq!(app.page(), &Page::Settings);
+                assert_eq!(app.settings.slow_app_banner.dismissals, 0);
+            } else {
+                assert_eq!(app.settings.slow_app_banner.dismissals, 1);
+            }
+            app.backend.shutdown();
+        }
+    }
+
+    #[test]
     fn personal_app_intro_can_be_dismissed_or_open_setup_with_keyboard_focus() {
         use egui::accesskit::{Action as AccessibleAction, Role};
 
@@ -3243,7 +3287,7 @@ mod tests {
                 if setup {
                     "Set up personal app"
                 } else {
-                    "Keep shared app"
+                    "Not now"
                 },
                 Role::Button,
             );
