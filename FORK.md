@@ -73,8 +73,9 @@ backend events there, cover colours included.
 
 ## Keeping up with upstream
 
-Everything fork-specific lives in new files: `src/mods/`, this file and
-`.github/workflows/sync-upstream.yml`. Upstream files carry only these
+Everything fork-specific lives in new files: `src/mods/`, this file,
+`assets/update-public-key-mods.hex`, `.github/workflows/sync-upstream.yml`
+and `.github/workflows/release-mods.yml`. Upstream files carry only these
 `cfg(feature = "mods")` hooks:
 
 | File | Hook |
@@ -86,7 +87,7 @@ Everything fork-specific lives in new files: `src/mods/`, this file and
 | `src/ui/mod.rs` | `mods::place(ui)` in `central` after the top bar while the mod's page is open |
 | `src/ui/player_bar.rs` | `mods::page_button` beside the Lyrics button |
 | `src/app.rs` | `crate::mods::sync(self, ctx)` at the top of `sync_media_controls`; `Action::Back` closes the mod's page |
-| `src/updates.rs` | builds with mods update from `watdafawx/spotifast` releases |
+| `src/updates.rs` | builds with mods update from `watdafawx/spotifast` releases, signed with the fork's key |
 | `src/backend.rs` | `Command::Mods` and its arm, which runs `mods::proxy::serve` with the engine and API gateway |
 
 One fork change is not behind the feature: **glass themes on Windows**.
@@ -118,6 +119,25 @@ git fetch upstream && git merge upstream/main
 Upstream's own workflows (issue triage, releases, project board) also
 run in a fork. Turn off the ones that don't apply under the fork's
 Settings → Actions instead of deleting the files, so they never conflict.
+
+## Releases
+
+Upstream's `Release` stays off here: it signs with upstream's key and
+publishes upstream's packages. `Release mods` runs on every push to `mods`
+(the sync's included) and by hand. When the `Cargo.toml` version has no
+release on this fork yet, it builds the Windows x64 app with mods, packages
+the zip and setup program the updater asks for, writes `checksums.txt`,
+signs it (`checksums.txt.sig`) and publishes the release under upstream's
+version number, moving the fork's `v*` tag to the `mods` commit. Run it by
+hand with `force` to replace the current version's release after a
+fork-only change.
+
+Builds with mods only accept updates signed with the fork's Ed25519 key
+(`assets/update-public-key-mods.hex`). The private key is the
+`MODS_UPDATE_SIGNING_KEY` repository secret (PEM, from
+`openssl genpkey -algorithm ed25519`). A build made before the fork had its
+own key checks upstream's key and refuses fork releases: install one fork
+release by hand once.
 
 ## Build and test
 
