@@ -401,12 +401,20 @@ fn waveform(
 /// The seek bar as the song's waveform: thin bars mirrored about the
 /// middle, as tall as the song is loud there, bright up to `shown` and
 /// grey after it. Steps not yet heard stay at the floor, dimmer still.
-/// Hovered or dragged, a playhead in the accent marks the position.
+/// Where the pointer is, and the song's length for the time under it.
+struct SeekPointer {
+    pos: Option<egui::Pos2>,
+    duration_ms: u32,
+}
+
+/// Hovered or dragged, a playhead in the accent follows the pointer, with
+/// the time there in a label above it.
 fn seek_waveform(
     painter: &egui::Painter,
     rect: Rect,
     shown: f32,
     active: bool,
+    pointer: SeekPointer,
     levels: Option<&crate::seekwave::Levels>,
     palette: &theme::Palette,
 ) {
@@ -452,9 +460,39 @@ fn seek_waveform(
         mesh.add_colored_rect(bar, colour);
     }
     painter.add(egui::Shape::mesh(mesh));
-    if active {
-        painter.vline(head, rect.y_range(), egui::Stroke::new(2.0, palette.accent));
+    if !active {
+        return;
     }
+    // The pointer counts while it is over the bar or dragging it; focus from
+    // the keyboard leaves it wherever it is.
+    let pressed = painter.ctx().input(|input| input.pointer.primary_down());
+    let duration_ms = pointer.duration_ms;
+    let Some(pointer) = pointer
+        .pos
+        .filter(|pointer| pressed || rect.expand(6.0).contains(*pointer))
+    else {
+        // Focused from the keyboard: mark where the song is.
+        painter.vline(head, rect.y_range(), egui::Stroke::new(2.0, palette.accent));
+        return;
+    };
+    let x = pointer.x.clamp(rect.left(), rect.right());
+    painter.vline(x, rect.y_range(), egui::Stroke::new(2.0, palette.accent));
+    if duration_ms == 0 {
+        return;
+    }
+    let fraction = (x - rect.left()) / rect.width().max(1.0);
+    let time = crate::util::format_duration_ms((fraction * duration_ms as f32) as u32);
+    // Above everything, so the transport's buttons never cover it.
+    let label = painter.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("seek-wave-time"),
+    ));
+    let galley = label.layout_no_wrap(time, theme::regular(11.0), palette.text);
+    let size = galley.size() + vec2(10.0, 4.0);
+    let left = (x - size.x / 2.0).clamp(rect.left(), (rect.right() - size.x).max(rect.left()));
+    let bubble = Rect::from_min_size(pos2(left, rect.top() - size.y - 4.0), size);
+    label.rect_filled(bubble, 4.0, palette.surface.gamma_multiply(0.92));
+    label.galley(bubble.min + vec2(5.0, 2.0), galley, palette.text);
 }
 
 /// Ease the final fill's RGB. Untinted custom panels keep their alpha while
@@ -999,6 +1037,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
             wave.refresh(&now.uri, &mut app.seek_wave_view);
             app.seek_wave_view.levels.as_ref()
         });
+        let pointer = slider_ui.ctx().pointer_latest_pos();
         painted_slider(
             &mut slider_ui,
             seek_id,
@@ -1007,7 +1046,18 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
             vec2(slider_width, slider_height),
             None,
             |painter, rect, shown, active| {
-                seek_waveform(painter, rect, shown, active, levels, &palette);
+                seek_waveform(
+                    painter,
+                    rect,
+                    shown,
+                    active,
+                    SeekPointer {
+                        pos: pointer,
+                        duration_ms: duration,
+                    },
+                    levels,
+                    &palette,
+                );
             },
         )
     } else {

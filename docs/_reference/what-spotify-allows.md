@@ -48,8 +48,9 @@ listeners.
 
 Spotify also limits apps created since November 2024. These apps cannot access
 Spotify-owned playlists, related artists, recommendations, or audio features
-(so the waveform seek bar is worked out on this computer from the decoded
-sound, not from Spotify's audio analysis). This is why the personal app cannot handle every request. Complete playlist
+(so the waveform seek bar reads Spotify's audio analysis over the librespot
+session instead, below, and works it out from the decoded sound when there
+is none). This is why the personal app cannot handle every request. Complete playlist
 library views come from the librespot session's rootlist while local playback
 is signed in, and from a shared grant made before 0.14.2 while one is still
 signed in. Playlists other people own, and every playlist when there is no
@@ -159,6 +160,12 @@ Spotifast's librespot fork until a librespot release includes it. Pathfinder
 queries, which librespot does not make, stay in Spotifast. Spotify can change
 any of these without notice, so a feature that uses one falls back to the Web
 API where it has an answer, and otherwise leaves out what it could not read.
+
+The waveform seek bar asks spclient for a track's audio analysis
+(`audio-attributes/v1/audio-analysis/{id}`, the request Spotify's own client
+makes) and draws each segment's peak loudness. A 404 or a failure leaves it
+to the sound itself: decoded from librespot's audio cache once the whole file
+is there, and filled in during play until then.
 
 ## Optional Soloist playback
 

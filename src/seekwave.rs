@@ -1,8 +1,12 @@
 //! The waveform seek bar's picture of a song: how loud it is across its
 //! whole length, in [`BUCKETS`] steps.
 //!
-//! Spotify's audio analysis is closed to new apps, so the picture is worked
-//! out here from the sound itself. It fills in from the samples the player
+//! The whole song comes at once from Spotify's audio analysis when the
+//! session's spclient has one (`audio-attributes/v1/audio-analysis`, the
+//! request Spotify's own client makes; the Web API's copy is closed to new
+//! apps). Each segment's peak loudness is shaped the way the Spicetify
+//! waveform extension drew it ([`from_analysis`]). Without an analysis the
+//! picture is worked out from the sound itself. It fills in from the samples the player
 //! decodes as the song plays (post-equalizer, pre-volume, like every
 //! visualiser), and once librespot has the song's whole file in its audio
 //! cache the file is decoded on a background thread to complete it at once
@@ -27,10 +31,18 @@ const COMPLETE_ENOUGH: usize = BUCKETS * 99 / 100;
 const FRAME_RATE: u64 = 44_100;
 /// The stereo channels librespot decodes to.
 const CHANNELS: usize = 2;
-/// The cache file: magic, version, step count, then a byte a step.
+/// The cache file: magic, version, step count, whether the steps are
+/// shaped bar heights (from an analysis) rather than measured levels, then
+/// a byte a step. Version 1 files, measured only, are worked out again.
 const MAGIC: &[u8; 4] = b"SFWV";
-const VERSION: u8 = 1;
-const HEADER: usize = 4 + 1 + 2;
+const VERSION: u8 = 2;
+const HEADER: usize = 4 + 1 + 2 + 1;
+/// The quietest peak an analysis segment can show, in decibels; anything
+/// quieter has no bar. The Spicetify extension's range.
+const ANALYSIS_FLOOR_DB: f64 = -40.0;
+/// How sharply loud passages stand out from quiet ones in an analysis
+/// picture: the extension's contrast factor.
+const ANALYSIS_CONTRAST: i32 = 4;
 /// How far below the song's loudest step the quietest bar still shows, in
 /// decibels; anything quieter draws as the flat floor.
 const RANGE_DB: f32 = 20.0;
@@ -40,17 +52,23 @@ pub const FLOOR: f32 = 0.08;
 
 /// One song's loudness: each step's RMS level, companded into a byte (the
 /// square root of the level, so quiet passages keep detail), and whether
-/// that step has been heard or decoded yet.
+/// that step has been heard or decoded yet. A `shaped` picture holds bar
+/// heights out of 255 instead, from an analysis.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Levels {
     pub values: Vec<u8>,
     pub filled: Vec<bool>,
+    pub shaped: bool,
 }
 
 impl Levels {
-    fn complete(values: Vec<u8>) -> Self {
+    fn complete(values: Vec<u8>, shaped: bool) -> Self {
         let filled = vec![true; values.len()];
-        Self { values, filled }
+        Self {
+            values,
+            filled,
+            shaped,
+        }
     }
 
     /// Whether every step is known.
@@ -113,7 +131,11 @@ impl Builder {
             .map(|(&power, &count)| compand(power, count))
             .collect();
         let filled = self.counts.iter().map(|&count| count > 0).collect();
-        Levels { values, filled }
+        Levels {
+            values,
+            filled,
+            shaped: false,
+        }
     }
 
     /// Every step's level, a step never reached taking its nearest
@@ -160,12 +182,74 @@ pub fn reduce(samples: &[f64], total_frames: u64) -> Vec<u8> {
     builder.finish().unwrap_or_else(|| vec![0; BUCKETS])
 }
 
+/// A song's picture from Spotify's audio analysis JSON: each segment's peak
+/// loudness, -40 to 0 dB, raised to [`ANALYSIS_CONTRAST`], spread over the
+/// steps it covers, the loudest segment winning a step. `None` for an
+/// answer without segments or length.
+pub fn from_analysis(bytes: &[u8]) -> Option<Vec<u8>> {
+    #[derive(serde::Deserialize)]
+    struct Analysis {
+        track: Track,
+        segments: Vec<Segment>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Track {
+        duration: f64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Segment {
+        start: f64,
+        duration: f64,
+        loudness_max: f64,
+    }
+    let analysis: Analysis = serde_json::from_slice(bytes).ok()?;
+    let length = analysis.track.duration;
+    if !length.is_finite() || length <= 0.0 || analysis.segments.is_empty() {
+        return None;
+    }
+    let step = length / BUCKETS as f64;
+    let index = |seconds: f64| ((seconds / step).floor().max(0.0) as usize).min(BUCKETS - 1);
+    let mut heights = vec![0.0f64; BUCKETS];
+    for segment in &analysis.segments {
+        if !(segment.start.is_finite()
+            && segment.duration.is_finite()
+            && segment.loudness_max.is_finite())
+        {
+            continue;
+        }
+        let first = index(segment.start);
+        let last = index(segment.start + segment.duration).max(first);
+        let loudness = 1.0 - segment.loudness_max.clamp(ANALYSIS_FLOOR_DB, 0.0) / ANALYSIS_FLOOR_DB;
+        let height = loudness.powi(ANALYSIS_CONTRAST);
+        for slot in &mut heights[first..=last] {
+            *slot = slot.max(height);
+        }
+    }
+    Some(
+        heights
+            .into_iter()
+            .map(|height| (height * 255.0).round() as u8)
+            .collect(),
+    )
+}
+
 /// The heights of `bars` bars across the song, from [`FLOOR`] to 1, with
-/// the loudest step at full height; `None` where nothing is known yet.
+/// the loudest step at full height; `None` where nothing is known yet. A
+/// shaped picture's heights are drawn as they are.
 pub fn bar_heights(levels: &Levels, bars: usize) -> Vec<Option<f32>> {
     let steps = levels.values.len();
     if bars == 0 || steps == 0 {
         return Vec::new();
+    }
+    if levels.shaped {
+        return (0..bars)
+            .map(|bar| {
+                let first = bar * steps / bars;
+                let last = ((bar + 1) * steps / bars).max(first + 1).min(steps);
+                let peak = levels.values[first..last].iter().copied().max()?;
+                Some((f32::from(peak) / 255.0).max(FLOOR))
+            })
+            .collect();
     }
     let loudest = levels
         .values
@@ -191,25 +275,28 @@ pub fn bar_heights(levels: &Levels, bars: usize) -> Vec<Option<f32>> {
         .collect()
 }
 
-/// The cache file's bytes for complete `values`.
-pub fn encode(values: &[u8]) -> Vec<u8> {
+/// The cache file's bytes for complete `values`, `shaped` when they are
+/// bar heights from an analysis.
+pub fn encode(values: &[u8], shaped: bool) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER + values.len());
     bytes.extend_from_slice(MAGIC);
     bytes.push(VERSION);
     bytes.extend_from_slice(&(values.len() as u16).to_le_bytes());
+    bytes.push(u8::from(shaped));
     bytes.extend_from_slice(values);
     bytes
 }
 
-/// The levels in a cache file, or `None` for a file this version cannot
-/// read: another format, a later version or a short write.
-pub fn decode(bytes: &[u8]) -> Option<Vec<u8>> {
+/// The levels in a cache file and whether they are shaped, or `None` for a
+/// file this version cannot read: another format or version, or a short
+/// write.
+pub fn decode(bytes: &[u8]) -> Option<(Vec<u8>, bool)> {
     let (header, values) = bytes.split_at_checked(HEADER)?;
-    if &header[..4] != MAGIC || header[4] != VERSION {
+    if &header[..4] != MAGIC || header[4] != VERSION || header[7] > 1 {
         return None;
     }
     let count = usize::from(u16::from_le_bytes([header[5], header[6]]));
-    (count == BUCKETS && values.len() == count).then(|| values.to_vec())
+    (count == BUCKETS && values.len() == count).then(|| (values.to_vec(), header[7] == 1))
 }
 
 /// The cache file for the song at `uri`, such as `spotify:track:…`.
@@ -222,7 +309,7 @@ fn cache_file(dir: &Path, uri: &str) -> Option<PathBuf> {
     (!name.is_empty() && !uri.starts_with("spotify:local:")).then(|| dir.join(name + ".wave"))
 }
 
-fn load(dir: &Path, uri: &str) -> Option<Vec<u8>> {
+fn load(dir: &Path, uri: &str) -> Option<(Vec<u8>, bool)> {
     let mut bytes = Vec::new();
     std::fs::File::open(cache_file(dir, uri)?)
         .ok()?
@@ -234,7 +321,7 @@ fn load(dir: &Path, uri: &str) -> Option<Vec<u8>> {
 
 /// Writes beside the file, then renames over it, so a reader never sees
 /// half a file.
-fn save(dir: &Path, uri: &str, values: &[u8]) {
+fn save(dir: &Path, uri: &str, values: &[u8], shaped: bool) {
     let Some(path) = cache_file(dir, uri) else {
         return;
     };
@@ -242,7 +329,7 @@ fn save(dir: &Path, uri: &str, values: &[u8]) {
         std::fs::create_dir_all(dir)?;
         let partial = path.with_extension("wave.part");
         let mut file = std::fs::File::create(&partial)?;
-        file.write_all(&encode(values))?;
+        file.write_all(&encode(values, shaped))?;
         file.sync_all()?;
         drop(file);
         std::fs::rename(&partial, &path)
@@ -274,7 +361,8 @@ struct Inner {
     /// The next frame the player hands over, counted from the song's start.
     frame: u64,
     builder: Option<Builder>,
-    complete: Option<Vec<u8>>,
+    /// The finished picture, and whether it is shaped from an analysis.
+    complete: Option<(Vec<u8>, bool)>,
 }
 
 impl std::fmt::Debug for SeekWave {
@@ -369,8 +457,8 @@ impl SeekWave {
             let spawned = std::thread::Builder::new()
                 .name("seek-wave-load".into())
                 .spawn(move || {
-                    if let Some(values) = load(&dir, &uri) {
-                        wave.install(generation, values, false);
+                    if let Some((values, shaped)) = load(&dir, &uri) {
+                        wave.finish(generation, values, shaped, false);
                     }
                 });
             if let Err(error) = spawned {
@@ -428,9 +516,19 @@ impl SeekWave {
         }
     }
 
-    /// Completes the picture of `generation` with `values`, keeping them on
-    /// disk when `keep`.
+    /// Completes the picture of `generation` with measured `values`,
+    /// keeping them on disk when `keep`.
     pub fn install(&self, generation: u64, values: Vec<u8>, keep: bool) {
+        self.finish(generation, values, false, keep);
+    }
+
+    /// Completes the picture of `generation` with an analysis's shaped
+    /// heights, and keeps them.
+    pub fn install_analysis(&self, generation: u64, values: Vec<u8>) {
+        self.finish(generation, values, true, true);
+    }
+
+    fn finish(&self, generation: u64, values: Vec<u8>, shaped: bool, keep: bool) {
         if values.len() != BUCKETS {
             return;
         }
@@ -440,11 +538,11 @@ impl SeekWave {
         }
         let uri = inner.uri.clone();
         inner.builder = None;
-        inner.complete = Some(values.clone());
+        inner.complete = Some((values.clone(), shaped));
         inner.version += 1;
         drop(inner);
         if keep && let Some(dir) = self.dir() {
-            save(&dir, &uri, &values);
+            save(&dir, &uri, &values, shaped);
         }
     }
 
@@ -459,7 +557,7 @@ impl SeekWave {
         inner.version += 1;
         if known >= values.len() {
             inner.builder = None;
-            inner.complete = Some(values.to_vec());
+            inner.complete = Some((values.to_vec(), false));
             return;
         }
         let mut builder = Builder::new(BUCKETS as u64);
@@ -490,7 +588,7 @@ impl SeekWave {
         view.uri = uri.to_string();
         view.version = inner.version;
         view.levels = match (&inner.complete, &inner.builder) {
-            (Some(values), _) => Some(Levels::complete(values.clone())),
+            (Some((values, shaped)), _) => Some(Levels::complete(values.clone(), *shaped)),
             (None, Some(builder)) => Some(builder.levels()),
             (None, None) => None,
         };
@@ -611,14 +709,19 @@ mod tests {
     #[test]
     fn the_cache_format_round_trips_and_refuses_anything_else() {
         let values: Vec<u8> = (0..BUCKETS).map(|i| (i % 256) as u8).collect();
-        let bytes = encode(&values);
+        let bytes = encode(&values, false);
         assert_eq!(bytes.len(), HEADER + BUCKETS);
-        assert_eq!(&bytes[..5], b"SFWV\x01");
-        assert_eq!(decode(&bytes), Some(values.clone()));
+        assert_eq!(&bytes[..5], b"SFWV\x02");
+        assert_eq!(decode(&bytes), Some((values.clone(), false)));
+        assert_eq!(decode(&encode(&values, true)), Some((values.clone(), true)));
+        // A version 1 file, measured only, is worked out again.
+        let mut first = bytes.clone();
+        first[4] = 1;
+        assert_eq!(decode(&first), None);
         assert_eq!(decode(&bytes[..bytes.len() - 1]), None);
         assert_eq!(decode(&bytes[..3]), None);
         let mut later = bytes.clone();
-        later[4] = 2;
+        later[4] = 3;
         assert_eq!(decode(&later), None);
         let mut other = bytes;
         other[0] = b'X';
@@ -641,8 +744,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("spotifast-wave-{}", std::process::id()));
         let uri = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
         let values = vec![42; BUCKETS];
-        save(&dir, uri, &values);
-        assert_eq!(load(&dir, uri), Some(values));
+        save(&dir, uri, &values, true);
+        assert_eq!(load(&dir, uri), Some((values, true)));
         assert_eq!(load(&dir, "spotify:track:other"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -653,7 +756,11 @@ mod tests {
         values[BUCKETS / 2..].fill(0);
         let mut filled = vec![true; BUCKETS];
         filled[BUCKETS - 1] = false;
-        let levels = Levels { values, filled };
+        let levels = Levels {
+            values,
+            filled,
+            shaped: false,
+        };
         let bars = bar_heights(&levels, 4);
         assert_eq!(bars[0], Some(1.0));
         assert_eq!(bars[2], Some(FLOOR));
@@ -662,12 +769,13 @@ mod tests {
         let unknown = Levels {
             values: vec![0; BUCKETS],
             filled: vec![false; BUCKETS],
+            shaped: false,
         };
         assert!(bar_heights(&unknown, 10).iter().all(Option::is_none));
         // Half the RMS is 6 dB down: under a third of the 20 dB range lower.
         let mut values = vec![255; BUCKETS];
         values[BUCKETS / 2..].fill(180);
-        let bars = bar_heights(&Levels::complete(values), 2);
+        let bars = bar_heights(&Levels::complete(values, false), 2);
         assert!((bars[1].unwrap() - 0.7).abs() < 0.02, "{bars:?}");
     }
 
@@ -703,5 +811,55 @@ mod tests {
         assert!(view.levels.is_none());
         wave.set_enabled(false);
         assert!(!wave.wants(next));
+    }
+
+    #[test]
+    fn an_analysis_draws_the_whole_song_shaped_like_the_extension() {
+        // A 10 s song: loud first half (0 dB), quieter (-20 dB), then a
+        // segment below the floor.
+        let json = br#"{"track":{"duration":10.0},"segments":[
+            {"start":0.0,"duration":5.0,"loudness_max":0.0},
+            {"start":5.0,"duration":4.0,"loudness_max":-20.0},
+            {"start":9.0,"duration":1.0,"loudness_max":-60.0}]}"#;
+        let values = from_analysis(json).unwrap();
+        assert_eq!(values.len(), BUCKETS);
+        assert_eq!(values[0], 255);
+        assert_eq!(values[BUCKETS / 2 - 1], 255);
+        // Half way down the 40 dB range, to the 4th power: a 16th.
+        assert_eq!(values[BUCKETS * 6 / 10], 16);
+        assert_eq!(values[BUCKETS - 1], 0);
+        let bars = bar_heights(&Levels::complete(values, true), 10);
+        assert_eq!(bars[0], Some(1.0));
+        assert_eq!(bars[9], Some(FLOOR));
+    }
+
+    #[test]
+    fn an_analysis_without_segments_or_length_gives_nothing() {
+        assert_eq!(from_analysis(b"not json"), None);
+        let no_length = br#"{"track":{"duration":0},"segments":[
+            {"start":0,"duration":1,"loudness_max":0}]}"#;
+        assert_eq!(from_analysis(no_length), None);
+        assert_eq!(
+            from_analysis(br#"{"track":{"duration":10},"segments":[]}"#),
+            None
+        );
+        // A segment past the listed end lands in the last step.
+        let late = br#"{"track":{"duration":1},"segments":[
+            {"start":2,"duration":1,"loudness_max":0}]}"#;
+        assert_eq!(from_analysis(late).unwrap()[BUCKETS - 1], 255);
+    }
+
+    #[test]
+    fn an_analysis_picture_is_kept_as_shaped() {
+        let wave = Arc::new(SeekWave::default());
+        wave.set_enabled(true);
+        let uri = "spotify:track:a";
+        let generation = wave.follow(uri, 1000, 0);
+        wave.install_analysis(generation, vec![128; BUCKETS]);
+        assert!(!wave.wants(generation));
+        let mut view = View::default();
+        wave.refresh(uri, &mut view);
+        let levels = view.levels.unwrap();
+        assert!(levels.shaped && levels.is_complete());
     }
 }

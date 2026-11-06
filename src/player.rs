@@ -1159,12 +1159,15 @@ impl SeekWaveFeed {
 /// through songs never asks Spotify for extra keys.
 const SEEK_WAVE_SETTLE: Duration = Duration::from_secs(5);
 /// How often to look for the song's file in librespot's audio cache.
-const SEEK_WAVE_POLL: Duration = Duration::from_secs(2);
+const SEEK_WAVE_POLL: Duration = Duration::from_secs(1);
+/// How long a new song waits before asking for its audio analysis, so a
+/// picture kept on disk wins and a quick skip asks nothing.
+const SEEK_WAVE_ANALYSIS_DELAY: Duration = Duration::from_millis(400);
 
-/// Completes the waveform of the song in `item` from librespot's audio
-/// cache once its whole file is there: the file is decrypted and decoded
-/// on a blocking thread. Without an audio cache, or when the key cannot be
-/// had, the picture fills in from playback alone.
+/// Completes the waveform of the song in `item`: at once from Spotify's
+/// audio analysis when spclient has one, else from librespot's audio cache
+/// once its whole file is there (decrypted and decoded on a blocking
+/// thread). Without either, the picture fills in from playback alone.
 async fn complete_seek_wave(
     wave: Arc<crate::seekwave::SeekWave>,
     generation: u64,
@@ -1174,6 +1177,16 @@ async fn complete_seek_wave(
     let Ok(track_id) = SpotifyId::try_from(&item.track_id) else {
         return;
     };
+    tokio::time::sleep(SEEK_WAVE_ANALYSIS_DELAY).await;
+    if !wave.wants(generation) {
+        return;
+    }
+    if let Some(session) = wave.session().filter(|session| !session.is_invalid())
+        && let Some(values) = seek_wave_analysis(&session, &track_id).await
+    {
+        wave.install_analysis(generation, values);
+        return;
+    }
     let started = Instant::now();
     let give_up =
         started + Duration::from_millis(u64::from(item.duration_ms)) + Duration::from_secs(60);
@@ -1227,6 +1240,45 @@ async fn complete_seek_wave(
         Ok(Some(values)) => wave.install(generation, values, true),
         Ok(None) => log::debug!("waveform left to playback, file unreadable"),
         Err(error) => log::debug!("waveform decode failed: {error}"),
+    }
+}
+
+/// The song's waveform from Spotify's audio analysis, the request Spotify's
+/// own client makes through spclient; `None` when it has none (404) or the
+/// request fails, and the picture is worked out from the sound instead.
+async fn seek_wave_analysis(
+    session: &librespot_core::Session,
+    track_id: &SpotifyId,
+) -> Option<Vec<u8>> {
+    let endpoint = format!(
+        "/audio-attributes/v1/audio-analysis/{}",
+        track_id.to_base62()
+    );
+    match session
+        .spclient()
+        .request_as_json(&reqwest::Method::GET, &endpoint, None, None)
+        .await
+    {
+        Ok(bytes) => {
+            let values = crate::seekwave::from_analysis(&bytes);
+            log::info!(
+                "waveform analysis {}: {}",
+                track_id.to_base62(),
+                if values.is_some() {
+                    "found"
+                } else {
+                    "unreadable"
+                }
+            );
+            values
+        }
+        Err(error) => {
+            log::info!(
+                "waveform analysis {}: not had ({error})",
+                track_id.to_base62()
+            );
+            None
+        }
     }
 }
 
