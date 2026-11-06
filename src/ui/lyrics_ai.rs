@@ -81,10 +81,13 @@ fn ruby(
             let reading = word.reading.as_ref().map(|reading| {
                 painter.layout_no_wrap(reading.clone(), reading_font.clone(), reading_color)
             });
-            let width = main
-                .size()
-                .x
-                .max(reading.as_ref().map_or(0.0, |galley| galley.size().x));
+            // Readings wider than their word keep a little room on each
+            // side, so neighbours never run together.
+            let width = main.size().x.max(
+                reading
+                    .as_ref()
+                    .map_or(0.0, |galley| galley.size().x + reading_height * 0.5),
+            );
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2(width, reading_height + main.size().y),
                 egui::Sense::hover(),

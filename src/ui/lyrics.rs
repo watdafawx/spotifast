@@ -994,7 +994,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                             index,
                             text,
                             font.clone(),
-                            (size * 0.42).max(14.0),
+                            (size * 0.5).max(15.0),
                             color,
                             sense,
                         )

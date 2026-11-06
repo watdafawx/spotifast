@@ -837,8 +837,10 @@ fn prompt(request: &Request, distinct: &[&str]) -> (String, String) {
             "- words: the same line cut into its words, in order, each as [original, reading]. \
              original is copied exactly from the line, so the originals rebuild it; reading is \
              that word's part of the pronunciation, or null for a word already in the Latin \
-             alphabet. Cut Japanese and Chinese into words too, keeping kanji with their \
-             okurigana.\n",
+             alphabet. Keep the pieces short, one word each, never a whole phrase: Chinese \
+             in words of one to three characters, Japanese in single words with their \
+             particles apart and kanji kept with their okurigana. Put spaces between the \
+             syllables of a Chinese reading.\n",
         );
     }
     if request.wanted.translation {
@@ -861,6 +863,7 @@ pub async fn fetch(
 ) -> Result<Extras, Error> {
     let path = cache_path(cache_dir, request);
     if let Some(cached) = read_cache(&path, request.lines.len()) {
+        log::debug!("lyrics extras for {}: from the cache", request.uri);
         return Ok(cached);
     }
     let key = keys.get(request.provider);
@@ -874,6 +877,13 @@ pub async fn fetch(
         });
     }
     let (system, user) = prompt(request, &distinct);
+    log::info!(
+        "lyrics extras for {}: asking {} ({}) about {} lines",
+        request.uri,
+        request.provider.label(),
+        request.model,
+        distinct.len()
+    );
     let text = match request.provider {
         Provider::Gemini => gemini(http, request, key, &system, &user).await,
         Provider::OpenAiCompatible => openai(http, request, key, &system, &user).await,
@@ -1186,7 +1196,8 @@ fn same_words(a: &str, b: &str) -> bool {
 
 /// 2: answers for mixed-script songs no longer lose their translations.
 /// 3: readings word by word.
-const CACHE_VERSION: u32 = 3;
+/// 4: shorter pieces, so readings do not run together.
+const CACHE_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
