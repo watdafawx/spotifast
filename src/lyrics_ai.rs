@@ -99,6 +99,33 @@ impl AiSettings {
     }
 }
 
+/// Where to get a key for `provider` at `base_url`: the service's name and
+/// its key page. `None` for an OpenAI-compatible endpoint we do not know.
+pub fn key_page(provider: Provider, base_url: &str) -> Option<(&'static str, &'static str)> {
+    match provider {
+        Provider::Gemini => Some(("Google AI Studio", "https://aistudio.google.com/apikey")),
+        Provider::OpenAiCompatible => {
+            let host = base_url.to_ascii_lowercase();
+            [
+                (
+                    "openrouter.ai",
+                    "OpenRouter",
+                    "https://openrouter.ai/settings/keys",
+                ),
+                (
+                    "api.openai.com",
+                    "OpenAI",
+                    "https://platform.openai.com/api-keys",
+                ),
+                ("api.groq.com", "Groq", "https://console.groq.com/keys"),
+            ]
+            .into_iter()
+            .find(|(domain, _, _)| host.contains(domain))
+            .map(|(_, name, url)| (name, url))
+        }
+    }
+}
+
 /// The listener's keys, one per provider. Deliberately no Debug: they are
 /// usable secrets.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1878,6 +1905,19 @@ mod tests {
         assert!(user.contains("1\t사랑해\n2\t보고 싶어\n"));
         assert!(user.contains("\"pronunciation\""));
         assert!(!user.contains("\"translation\""));
+    }
+
+    #[test]
+    fn each_provider_links_to_its_key_page() {
+        assert_eq!(
+            key_page(Provider::Gemini, "").map(|page| page.1),
+            Some("https://aistudio.google.com/apikey")
+        );
+        let page = |url| key_page(Provider::OpenAiCompatible, url).map(|page| page.0);
+        assert_eq!(page("https://openrouter.ai/api/v1"), Some("OpenRouter"));
+        assert_eq!(page("https://api.openai.com/v1"), Some("OpenAI"));
+        assert_eq!(page("https://api.groq.com/openai/v1"), Some("Groq"));
+        assert_eq!(page("http://localhost:1234/v1"), None);
     }
 
     #[test]

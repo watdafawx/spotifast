@@ -631,6 +631,25 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
     } else {
         ui.data_mut(|data| data.insert_temp(field_id, key));
     }
+    // Where to get a key for the provider chosen.
+    if let Some((name, url)) = crate::lyrics_ai::key_page(
+        app.settings.lyrics_ai.provider,
+        &app.settings.lyrics_ai.openai_base_url,
+    ) {
+        ui.add_space(6.0);
+        let label = gettext(
+            locale,
+            // Translators: {service} is where the key comes from, such as Google AI Studio.
+            "Get a key from {service}",
+        )
+        .replace("{service}", name);
+        if theme::link(ui, label, theme::medium(13.0), palette.accent)
+            .on_hover_text(url)
+            .clicked()
+        {
+            app.actions.push(Action::OpenUrl(url.to_string()));
+        }
+    }
     if let Some(error) = &app.lyrics_ai.key_error {
         ui.add_space(6.0);
         theme::text(ui, error, theme::regular(12.5), palette.danger);
