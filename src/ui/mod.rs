@@ -21,6 +21,8 @@ pub mod search;
 pub mod settings;
 pub mod show;
 pub mod sidebar;
+pub mod skin_cards;
+mod soloist;
 pub mod topbar;
 mod update;
 pub mod widgets;
@@ -53,6 +55,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         fastframe_titlebar::resize(ui);
         return;
     }
+    let soloist_view = app.soloist_view();
+    if soloist_view != crate::app::SoloistView::App {
+        player_bar::end_tint_session(ctx);
+        if soloist_view == crate::app::SoloistView::Loading {
+            login::show(app, ui, true);
+        } else {
+            soloist::onboarding(app, ui);
+        }
+        toasts(app, ctx, 20.0);
+        caption_buttons(ui, &app.palette, app.locale);
+        fastframe_titlebar::resize(ui);
+        return;
+    }
+    #[cfg(feature = "milkdrop")]
+    if app.immersive() {
+        if lyrics::immersive(app, ui) {
+            player_bar::show(app, ui);
+        }
+        lyrics::immersive_click(app, ui);
+        devices::popup(app, ctx);
+        dialogs::show(app, ctx);
+        toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
+        return;
+    }
     if titlebar_spans_window(cfg!(target_os = "macos"), fastframe_titlebar::enabled()) {
         fastframe_titlebar::drag(
             ui,
@@ -82,8 +108,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             friends::side_panel(app, ui);
         }
         central(app, ui);
-        keep_room_for_panels(app, ctx);
     }
+    keep_room_for_panels(app, ctx);
     devices::popup(app, ctx);
     dialogs::show(app, ctx);
     update::show(app, ctx);
@@ -112,20 +138,24 @@ pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 210.0;
 /// so even at its narrowest the page beside the panels keeps the room its
 /// top bar needs (#624), and lower it again once they close. Window managers
 /// that tile ignore the minimum; the panels still give way there.
+///
+/// Full-screen lyrics draw no sidebar or side panel (an open queue becomes a
+/// column inside them), so they ask for no room for them. A screen narrower
+/// than the panels' minimum, such as a portrait monitor, then holds the
+/// full-screen window without a minimum wider than itself (#783).
 fn keep_room_for_panels(app: &App, ctx: &Context) {
     if crate::window::fixed_size() {
         return;
     }
+    let panels = app.lyrics_fullscreen.is_none();
     let width = main_min_width(
         topbar::least_width(ctx),
-        app.settings
-            .sidebar_visible
-            .then_some(if app.settings.sidebar_collapsed {
-                sidebar::COLLAPSED_WIDTH
-            } else {
-                SIDEBAR_MIN_WIDTH
-            }),
-        app.show_queue_panel || app.show_lyrics_panel || app.show_friends_panel,
+        (panels && app.settings.sidebar_visible).then_some(if app.settings.sidebar_collapsed {
+            sidebar::COLLAPSED_WIDTH
+        } else {
+            SIDEBAR_MIN_WIDTH
+        }),
+        panels && (app.show_queue_panel || app.show_lyrics_panel || app.show_friends_panel),
     )
     .round();
     let id = Id::new("main-min-width");
@@ -295,7 +325,11 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                 .ctx()
                 .data(|data| data.get_temp::<f32>(scrolled_id))
                 .unwrap_or(0.0);
-            if let Some((top, bottom)) = header_wash(&palette, overview, tint) {
+            let countdown = matches!(&page, Page::Album(id)
+                if app.album_pages.get(id).is_some_and(|page| page.prerelease.is_some()));
+            // Countdown pages own their hero gradient. The generic artwork wash
+            // otherwise leaves an unrelated color band behind the search bar.
+            if !countdown && let Some((top, bottom)) = header_wash(&palette, overview, tint) {
                 widgets::paint_vertical_gradient(ui, header_rect(rect, scrolled), top, bottom);
             }
             ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
@@ -309,45 +343,57 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             if crate::mods::page_open() && crate::mods::place(ui) {
                 return;
             }
-            if app.slow_banner && app.dialog.is_none() && page != Page::Settings {
-                slow_banner(app, ui);
+            // One banner at a time: a song that will not play matters more
+            // than a slow app, which waits its turn.
+            if app.dialog.is_none() && page != Page::Settings {
+                if app.soloist_waiting() {
+                    soloist::banner(app, ui);
+                } else if app.audio_key_banner {
+                    audio_key_banner(app, ui);
+                } else if app.slow_banner {
+                    slow_banner(app, ui);
+                }
             }
-            let scroll = crate::autoscroll::show(
-                ui,
-                egui::ScrollArea::vertical()
-                    .id_salt(("page", page.encode()))
-                    .auto_shrink([false, false]),
-                egui::Vec2b::new(false, true),
-                |ui| {
-                    Frame::new()
-                        .inner_margin(Margin {
-                            left: widgets::PAGE_PADDING as i8,
-                            right: widgets::PAGE_PADDING as i8,
-                            top: 4,
-                            bottom: 48,
-                        })
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            match page {
-                                Page::Home => home::show(app, ui),
-                                Page::TopSongs => collection::top_songs(app, ui),
-                                Page::NewReleases => new_releases::page(app, ui),
-                                Page::Search => search::show(app, ui),
-                                Page::LikedSongs => collection::liked(app, ui),
-                                Page::Albums | Page::Artists | Page::Podcasts | Page::Episodes => {
-                                    library::show(app, ui, page)
-                                }
-                                Page::Playlist(id) => collection::playlist(app, ui, &id),
-                                Page::Album(id) => collection::album(app, ui, &id),
-                                Page::Artist(id) => artist::show(app, ui, &id),
-                                Page::Show(id) => show::show(app, ui, &id),
-                                Page::Radio(seed) => radio::radio(app, ui, &seed),
-                                Page::Queue => queue::page(app, ui),
-                                Page::Settings => settings::show(app, ui),
+            let page_key = page.encode();
+            let mut area = egui::ScrollArea::vertical()
+                .id_salt(("page", &page_key))
+                .auto_shrink([false, false]);
+            if let Some((_, offset)) = app.restore_scroll.take().filter(|(at, _)| *at == page_key) {
+                area = area.vertical_scroll_offset(offset);
+            }
+            let scroll = crate::autoscroll::show(ui, area, egui::Vec2b::new(false, true), |ui| {
+                Frame::new()
+                    .inner_margin(Margin {
+                        left: widgets::PAGE_PADDING as i8,
+                        right: widgets::PAGE_PADDING as i8,
+                        top: 4,
+                        bottom: 48,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        match page {
+                            Page::Home => home::show(app, ui),
+                            Page::TopSongs => collection::top_songs(app, ui),
+                            Page::NewReleases => new_releases::page(app, ui),
+                            Page::Search => search::show(app, ui),
+                            Page::LikedSongs => collection::liked(app, ui),
+                            Page::Albums | Page::Artists | Page::Podcasts | Page::Episodes => {
+                                library::show(app, ui, page)
                             }
-                        });
-                },
-            );
+                            Page::Playlist(id) => collection::playlist(app, ui, &id),
+                            Page::Album(id) => collection::album(app, ui, &id),
+                            Page::Artist(id) => artist::show(app, ui, &id),
+                            Page::Show(id) => show::show(app, ui, &id),
+                            Page::Radio(seed) => radio::radio(app, ui, &seed),
+                            Page::Queue => queue::page(app, ui),
+                            Page::Settings => settings::show(app, ui),
+                        }
+                    });
+                if app.dialog.is_none() && !app.show_devices {
+                    keys::scroll_page(ui);
+                }
+            });
+            app.page_scroll = Some((page_key, scroll.state.offset.y));
             ui.ctx()
                 .data_mut(|data| data.insert_temp(scrolled_id, scroll.state.offset.y));
             header_shadow(ui, scroll.inner_rect, scroll.state.offset.y, palette.dark);
@@ -355,12 +401,86 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// Where the "Why?" link of the slow-app banner leads.
-const SLOW_BANNER_GUIDE: &str = "https://spotifast.rocks/make-it-even-faster/";
+const SLOW_BANNER_GUIDE: &str = "https://spotifast.rocks/troubleshooting/#rate-limits";
+/// Where the "Why?" link of the audio-key banner leads.
+pub const AUDIO_KEY_GUIDE: &str = "https://spotifast.rocks/troubleshooting/#audio-key";
 
 /// A strip under the top bar suggesting a personal app, after Spotify
-/// told the shared app it sent too many requests. It stays put while the
+/// told the shared app, which only listeners signed in before 0.14.2 still
+/// use, that it sent too many requests. It stays put while the
 /// page scrolls, and goes when it is closed.
 fn slow_banner(app: &mut App, ui: &mut egui::Ui) {
+    use crate::i18n::gettext;
+    let locale = app.locale;
+    banner(
+        app,
+        ui,
+        &gettext(locale, "Spotify is being slow on the shared sign-in."),
+        &gettext(
+            locale,
+            "Spotifast no longer offers the shared sign-in, and Spotify can stop accepting it at any time. Register Spotifast and you won't have to wait.",
+        ),
+        false,
+        vec![
+            (
+                gettext(locale, "Register Spotifast"),
+                Action::OpenPersonalAppSetup,
+            ),
+            (
+                // Translators: a button that opens a page explaining why
+                // the banner it sits in appeared.
+                gettext(locale, "Why?"),
+                Action::OpenUrl(SLOW_BANNER_GUIDE.into()),
+            ),
+        ],
+        Some(Action::CloseSlowBanner),
+    );
+}
+
+/// A strip under the top bar after Spotify refused the key that decrypts a
+/// song on this computer, offering another Spotify device, which fetches
+/// its own audio, and the guide's explanation.
+fn audio_key_banner(app: &mut App, ui: &mut egui::Ui) {
+    use crate::i18n::gettext;
+    let locale = app.locale;
+    banner(
+        app,
+        ui,
+        &gettext(
+            locale,
+            "Spotify won't let this computer play this song right now.",
+        ),
+        &gettext(
+            locale,
+            "Spotify refused the key that unlocks the audio. Spotifast can't fix that, but it sometimes clears up on its own. You can still play on your phone or another Spotify device.",
+        ),
+        false,
+        vec![
+            (
+                gettext(locale, "Play on another device"),
+                Action::PlayOnAnotherDevice,
+            ),
+            (
+                gettext(locale, "Why?"),
+                Action::OpenUrl(AUDIO_KEY_GUIDE.into()),
+            ),
+        ],
+        Some(Action::CloseAudioKeyBanner),
+    );
+}
+
+/// A notice under the top bar: a bold line, with a spinner while `busy`, a
+/// sentence or two, its buttons with the main one first, and a close button
+/// unless the notice goes by itself.
+fn banner(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    title: &str,
+    text: &str,
+    busy: bool,
+    buttons: Vec<(std::borrow::Cow<'static, str>, Action)>,
+    close: Option<Action>,
+) {
     use crate::i18n::gettext;
     let palette = app.palette;
     let locale = app.locale;
@@ -383,62 +503,52 @@ fn slow_banner(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if theme::icon_button(
-                    ui,
-                    Icon::X,
-                    16.0,
-                    palette.secondary,
-                    palette.text,
-                    &gettext(locale, "Close banner"),
-                )
-                .clicked()
+                if let Some(close) = close
+                    && theme::icon_button(
+                        ui,
+                        Icon::X,
+                        16.0,
+                        palette.secondary,
+                        palette.text,
+                        &gettext(locale, "Close banner"),
+                    )
+                    .clicked()
                 {
-                    app.actions.push(Action::CloseSlowBanner);
+                    app.actions.push(close);
                 }
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(gettext(
-                                locale,
-                                "Spotify is being slow on the shared app.",
-                            ))
-                            .font(theme::bold(14.0))
-                            .color(palette.text),
-                        )
-                        .wrap(),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(gettext(
-                                locale,
-                                "Set up your own personal Spotify app and you won't have to wait. It's free and takes a few minutes.",
-                            ))
-                            .font(theme::regular(13.0))
-                            .color(palette.secondary),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if theme::pill_button(
-                            ui,
-                            &palette,
-                            &gettext(locale, "Set up personal app"),
-                            true,
-                        )
-                        .clicked()
-                        {
-                            app.actions.push(Action::OpenPersonalAppSetup);
+                    ui.horizontal(|ui| {
+                        if busy {
+                            theme::spinner(ui, 14.0, palette.accent);
                         }
-                        // Translators: a button that opens a page explaining
-                        // why the shared app is slow and what a personal app is.
-                        if theme::pill_button(ui, &palette, &gettext(locale, "Why?"), false)
-                            .clicked()
-                        {
-                            app.actions.push(Action::OpenUrl(SLOW_BANNER_GUIDE.into()));
-                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(title)
+                                    .font(theme::bold(14.0))
+                                    .color(palette.text),
+                            )
+                            .wrap(),
+                        );
                     });
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .font(theme::regular(13.0))
+                                .color(palette.secondary),
+                        )
+                        .wrap(),
+                    );
+                    if !buttons.is_empty() {
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (index, (label, action)) in buttons.into_iter().enumerate() {
+                                if theme::pill_button(ui, &palette, &label, index == 0).clicked() {
+                                    app.actions.push(action);
+                                }
+                            }
+                        });
+                    }
                 });
             });
         });
