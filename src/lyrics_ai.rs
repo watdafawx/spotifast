@@ -693,9 +693,35 @@ pub fn align(line: &str, words: &[Ruby]) -> Option<Vec<Ruby>> {
         return None;
     }
     push_plain(&mut out, rest);
+    let out = merge_split_words(out);
     out.iter()
         .any(|piece| piece.reading.is_some() || piece.gloss.is_some())
         .then_some(out)
+}
+
+/// Joins neighbouring pieces that share one meaning: a model sometimes
+/// cuts a word into characters and repeats its meaning on each (想 起,
+/// "remember" twice), and the word reads better whole, its meaning once.
+pub fn merge_split_words(pieces: Vec<Ruby>) -> Vec<Ruby> {
+    let mut out: Vec<Ruby> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        if let Some(last) = out.last_mut()
+            && !last.space
+            && last.gloss.is_some()
+            && last.gloss == piece.gloss
+            && last.reading.is_some() == piece.reading.is_some()
+        {
+            last.text.push_str(&piece.text);
+            if let (Some(held), Some(more)) = (&mut last.reading, &piece.reading) {
+                held.push(' ');
+                held.push_str(more);
+            }
+            last.space = piece.space;
+            continue;
+        }
+        out.push(piece);
+    }
+    out
 }
 
 fn is_han(c: char) -> bool {
@@ -954,7 +980,20 @@ pub async fn fetch(
         Provider::OpenAiCompatible => openai(http, request, key, &system, &user).await,
     }
     .map_err(|message| Error::Failed(scrub(&message, key)))?;
-    let parsed = parse(&text, distinct.len()).map_err(Error::Failed)?;
+    let parsed = parse(&text, distinct.len()).map_err(|error| {
+        // Lyrics and the model's words only, never the key.
+        let head: String = text.chars().take(300).collect();
+        let tail: String = {
+            let mut tail: Vec<char> = text.chars().rev().take(300).collect();
+            tail.reverse();
+            tail.into_iter().collect()
+        };
+        log::debug!(
+            "lyrics extras answer unreadable ({} chars): {head:?} … {tail:?}",
+            text.chars().count()
+        );
+        Error::Failed(error)
+    })?;
     let extras = spread(request, &distinct, parsed);
     write_cache(&path, &extras);
     Ok(extras)
@@ -1019,6 +1058,13 @@ async fn gemini(
             format!("Gemini gave no lyrics ({reason})")
         })?;
     // Thought parts, when a model sends them, are not the answer.
+    if let Some(reason) = json
+        .pointer("/candidates/0/finishReason")
+        .and_then(|value| value.as_str())
+        .filter(|reason| *reason != "STOP")
+    {
+        log::debug!("Gemini stopped early: {reason}");
+    }
     Ok(parts
         .iter()
         .filter(|part| part.get("thought").and_then(|value| value.as_bool()) != Some(true))
@@ -1304,8 +1350,16 @@ fn read_cache(path: &Path, line_count: usize) -> Option<Extras> {
         return None;
     }
     let cached: Cached = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (cached.version == CACHE_VERSION && cached.extras.lines.len() == line_count)
-        .then_some(cached.extras)
+    if cached.version != CACHE_VERSION || cached.extras.lines.len() != line_count {
+        return None;
+    }
+    let mut extras = cached.extras;
+    for line in &mut extras.lines {
+        if let Some(words) = line.words.take() {
+            line.words = Some(merge_split_words(words));
+        }
+    }
+    Some(extras)
 }
 
 fn write_cache(path: &Path, extras: &Extras) {
@@ -1571,6 +1625,32 @@ mod tests {
         let words = extras.lines[0].words.as_ref().unwrap();
         assert_eq!(words[1].gloss.as_deref(), Some("I want"));
         assert!(words[0].space);
+    }
+
+    #[test]
+    fn a_word_cut_into_characters_is_joined_under_one_meaning() {
+        let gloss = |text: &str, reading: &str, gloss: &str| Ruby {
+            text: text.into(),
+            reading: Some(reading.into()),
+            gloss: Some(gloss.into()),
+            space: false,
+        };
+        let merged = merge_split_words(vec![
+            gloss("想", "xiǎng", "remember"),
+            gloss("起", "qǐ", "remember"),
+            gloss("花", "huā", "flower"),
+        ]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].text, "想起");
+        assert_eq!(merged[0].reading.as_deref(), Some("xiǎng qǐ"));
+        assert_eq!(merged[0].gloss.as_deref(), Some("remember"));
+        // Separate words that happen to mean the same stay apart.
+        let mut apart = gloss("走", "zǒu", "go");
+        apart.space = true;
+        assert_eq!(
+            merge_split_words(vec![apart, gloss("走", "zǒu", "go")]).len(),
+            2
+        );
     }
 
     #[test]
