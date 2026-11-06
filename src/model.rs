@@ -1379,6 +1379,8 @@ pub enum Action {
         provider: crate::lyrics_ai::Provider,
         key: crate::lyrics_ai::SecretKey,
     },
+    /// Fork: save the Last.fm key genres use; empty removes it.
+    SaveLastFmKey(crate::lyrics_ai::SecretKey),
     ToggleDevicesPopup,
     /// Ask GitHub for the latest release and report the result to the user.
     CheckForUpdates,

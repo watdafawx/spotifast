@@ -7,6 +7,8 @@ pub mod collection;
 pub(crate) mod devices;
 mod dialogs;
 pub(crate) mod friends;
+/// Fork: the Genres settings section.
+mod genres;
 pub mod home;
 mod keys;
 pub mod library;

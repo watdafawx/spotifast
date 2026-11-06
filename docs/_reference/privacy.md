@@ -61,6 +61,13 @@ Spotifast connects only to the services below.
   20-second lookup budget, respecting `Retry-After`; search can recover when
   the exact lookup is temporarily unavailable. A failed lookup can use older
   cached lyrics, but never caches an outage as a missing transcription.
+- **MusicBrainz and Last.fm (fork).** While the player bar's genre line is
+  on, Spotifast sends the playing song's artists' Spotify IDs to
+  [musicbrainz.org](https://musicbrainz.org) to find their genres. If
+  MusicBrainz has none and you saved a Last.fm key, the artist's name goes
+  to Last.fm with that key. Each artist is asked about once a month; the
+  answers are kept in the cache folder. Turn the line off in Settings →
+  Genres to send nothing.
 - **GitHub.** Once a day, Spotifast asks GitHub for the latest release. You
   can turn automatic checks off in Settings. Downloading an update, and the
   first opening of MilkDrop, also fetch files from GitHub. No Spotify data is

@@ -134,6 +134,10 @@ pub struct Keys {
     pub gemini: String,
     #[serde(default)]
     pub openai: String,
+    /// Last.fm's API key, for genres MusicBrainz lacks (`crate::genres`).
+    /// Kept with the AI keys so it shares their credential store entry.
+    #[serde(default)]
+    pub lastfm: String,
 }
 
 impl Keys {
@@ -152,7 +156,17 @@ impl Keys {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.gemini.trim().is_empty() && self.openai.trim().is_empty()
+        self.gemini.trim().is_empty()
+            && self.openai.trim().is_empty()
+            && self.lastfm.trim().is_empty()
+    }
+
+    /// Sets one key; an empty key removes it.
+    pub fn set_for(&mut self, which: KeyFor, key: String) {
+        match which {
+            KeyFor::Ai(provider) => self.set(provider, key),
+            KeyFor::LastFm => self.lastfm = key,
+        }
     }
 
     /// Which providers have a key, for the settings page.
@@ -160,8 +174,17 @@ impl Keys {
         KeysPresent {
             gemini: !self.gemini.trim().is_empty(),
             openai: !self.openai.trim().is_empty(),
+            lastfm: !self.lastfm.trim().is_empty(),
         }
     }
+}
+
+/// Which saved key a change is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyFor {
+    Ai(Provider),
+    /// Last.fm, for genres (`crate::genres`).
+    LastFm,
 }
 
 /// Which keys are saved, without the keys.
@@ -169,6 +192,7 @@ impl Keys {
 pub struct KeysPresent {
     pub gemini: bool,
     pub openai: bool,
+    pub lastfm: bool,
 }
 
 impl KeysPresent {

@@ -1698,6 +1698,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "settings-player-skins" => {
                 app.winamp.demo_settings_filter = Some("Windows Media Player".into());
             }
+            // Fork: Settings filtered down to the Genres section.
+            "settings-genres" => {
+                app.winamp.demo_settings_filter = Some("Genres".into());
+            }
             // Follow system on a desktop fixed light or dark (Linux), for
             // shots of the light and dark mode themes.
             "system-light" | "system-dark" => {

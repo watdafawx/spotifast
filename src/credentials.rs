@@ -1868,6 +1868,7 @@ mod tests {
         Grant::AiKeys(crate::lyrics_ai::Keys {
             gemini: "dummy-gemini-key".into(),
             openai: String::new(),
+            lastfm: "dummy-lastfm-key".into(),
         })
     }
 

@@ -209,6 +209,11 @@ impl AppDirs {
         self.cache.join("skin-previews")
     }
 
+    /// Fork: artists' genres, a few dozen bytes each (`crate::genres`).
+    pub fn genre_cache_dir(&self) -> PathBuf {
+        crate::genres::cache_dir(&self.cache)
+    }
+
     pub fn lyrics_cache_dir(&self) -> PathBuf {
         self.cache.join("lyrics")
     }

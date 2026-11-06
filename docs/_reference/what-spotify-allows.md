@@ -243,6 +243,11 @@ The Web API and librespot do not provide these features:
   `your-library` service. There is no Web API for it, and librespot does not
   support its protocol. Spotifast's pins are local and are stored in
   `settings.json`. See [issue #31](https://github.com/crmne/spotifast/issues/31).
+- **Artist genres.** The Web API's artist object still has a `genres`
+  field, but answers it empty for every artist (checked in November 2026
+  against Drake, The Weeknd and Michael Jackson), and librespot's artist
+  metadata no longer carries one. The fork's player bar genre line takes
+  them from MusicBrainz and Last.fm instead (`src/genres.rs`).
 - **Editing playlist folders.** librespot can only read them.
 - **Smart Shuffle, Jam, Blend, and similar Spotify features.** Spotify
   generates these for its own clients. Spotifast only has plain shuffle.

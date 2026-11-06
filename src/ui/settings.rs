@@ -1241,7 +1241,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let show_custom_titlebar = cfg!(target_os = "linux") || app.windows_controls_visible();
     let player_bar_vis = gettext(locale, "Player bar visualizer");
     let player_bar_vis_click = gettext(locale, "Click player bar to change visualizer");
-    let player_bar_genres = gettext(locale, "Genres in player bar");
     let seek_waveform = gettext(locale, "Waveform seek bar");
     // Follow system's own light and dark palettes. Omarchy's palette already
     // follows the desktop, so they are offered only without it.
@@ -1358,13 +1357,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ),
         pair_row(fastframe_theme::Base::Light),
         pair_row(fastframe_theme::Base::Dark),
-        RowText::new(
-            player_bar_genres.clone(),
-            gettext(
-                locale,
-                "Show the playing song's genres under the artist names.",
-            ),
-        ),
         RowText::new(
             seek_waveform.clone(),
             gettext(
@@ -1615,25 +1607,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if widgets::switch(
                         ui,
                         &palette,
-                        &player_bar_genres,
-                        &mut app.settings.player_bar_genres,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                },
-            );
-            filtered_row(
-                ui,
-                &palette,
-                &needle,
-                &appearance,
-                &appearance_rows[14],
-                |ui| {
-                    if widgets::switch(
-                        ui,
-                        &palette,
                         &seek_waveform,
                         &mut app.settings.seek_waveform,
                     )
@@ -1862,6 +1835,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.push_id("lyrics-ai-settings", |ui| {
             section(ui, &palette, &lyrics_ai, |ui| {
                 if super::lyrics_ai::settings(app, ui, &palette) {
+                    changed = true;
+                }
+            });
+        });
+    }
+
+    // Fork: the player bar's genre line and where its genres come from.
+    let genres = gettext(locale, "Genres");
+    let genre_rows = [
+        RowText::new(
+            gettext(locale, "Genres in player bar"),
+            gettext(
+                locale,
+                "Show the playing song's genres under the artist names.",
+            ),
+        ),
+        RowText::new(
+            gettext(locale, "Last.fm key"),
+            gettext(
+                locale,
+                "Genres MusicBrainz lacks, from Last.fm with your own key.",
+            ),
+        ),
+    ];
+    if section_matches(&needle, &genres, &genre_rows) {
+        any_visible = true;
+        ui.push_id("genre-settings", |ui| {
+            section(ui, &palette, &genres, |ui| {
+                if super::genres::settings(app, ui, &palette) {
                     changed = true;
                 }
             });

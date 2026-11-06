@@ -200,19 +200,6 @@ pub enum ArtistGenres {
 /// How long a failed genre request waits before the next try.
 const GENRES_RETRY: Duration = Duration::from_secs(300);
 
-/// "latin pop" as "Latin Pop": the first letter of each word in capitals.
-fn capitalise_words(text: &str) -> String {
-    text.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            chars.next().map_or_else(String::new, |first| {
-                first.to_uppercase().chain(chars).collect()
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// The playing item as the interface sees it, whichever device plays it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
@@ -3111,8 +3098,22 @@ impl App {
                         self.lyrics_video.info = Some(result.ok().flatten());
                     }
                 }
+                Event::ArtistGenres { id, result } => {
+                    let entry = match result {
+                        Ok(genres) => ArtistGenres::Known(genres),
+                        Err(_) => ArtistGenres::Failed(Instant::now()),
+                    };
+                    self.artist_genres.insert(id, entry);
+                }
                 Event::AiKeys(result) => match result {
                     Ok(present) => {
+                        // A new Last.fm key may find the genres MusicBrainz
+                        // lacked, so the misses are asked again.
+                        if present.lastfm && !self.lyrics_ai.keys.is_some_and(|keys| keys.lastfm) {
+                            self.artist_genres.retain(|_, genres| {
+                                !matches!(genres, ArtistGenres::Known(found) if found.is_empty())
+                            });
+                        }
                         self.lyrics_ai.keys = Some(present);
                         self.lyrics_ai.retry();
                         self.request_lyrics_extras();
@@ -4542,7 +4543,10 @@ impl App {
         if now.is_episode {
             return;
         }
-        for id in now.artists.iter().filter_map(|artist| artist.id.as_ref()) {
+        for artist in &now.artists {
+            let Some(id) = &artist.id else {
+                continue;
+            };
             let due = match self.artist_genres.get(id) {
                 None => true,
                 Some(ArtistGenres::Failed(at)) => at.elapsed() >= GENRES_RETRY,
@@ -4551,13 +4555,16 @@ impl App {
             if due {
                 self.artist_genres.insert(id.clone(), ArtistGenres::Loading);
                 self.backend
-                    .api(ApiRequest::ArtistGenres { id: id.clone() });
+                    .send(Command::ArtistGenres(crate::genres::Request {
+                        id: id.clone(),
+                        name: artist.name.clone(),
+                    }));
             }
         }
     }
 
     /// The player bar's genre line for the playing song: up to three of its
-    /// artists' genres, the first artist's first, each word capitalised.
+    /// artists' genres, the first artist's first, as titles ("R&B").
     /// Empty when the setting is off or no artist has genres.
     pub fn playing_genres(&self, now: &NowPlaying) -> String {
         if !self.settings.player_bar_genres || now.is_episode {
@@ -4579,7 +4586,7 @@ impl App {
         genres
             .into_iter()
             .take(3)
-            .map(capitalise_words)
+            .map(crate::genres::display)
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -9796,19 +9803,14 @@ impl App {
                     Err(error) => self.search_failed(&gettext(self.locale, "Search"), error),
                 }
             }
-            ApiResponse::ArtistGenres { id, result } => {
-                self.artist_genres.insert(
-                    id,
-                    match result {
-                        Ok(genres) => ArtistGenres::Known(genres),
-                        Err(_) => ArtistGenres::Failed(Instant::now()),
-                    },
-                );
-            }
             ApiResponse::Artist { id, result } => {
                 if let Ok(artist) = &result {
-                    self.artist_genres
-                        .insert(id.clone(), ArtistGenres::Known(artist.genres.clone()));
+                    // Spotify lists genres only for some apps; when it does,
+                    // they spare the lookup elsewhere.
+                    if !artist.genres.is_empty() {
+                        self.artist_genres
+                            .insert(id.clone(), ArtistGenres::Known(artist.genres.clone()));
+                    }
                     if let Some(image) = pick_image(&artist.images, 64) {
                         self.tint_for(Some(image));
                     }
@@ -13864,6 +13866,7 @@ impl App {
                 self.request_lyrics_extras();
             }
             Action::LoadAiKeys => self.backend.send(Command::LoadAiKeys),
+            Action::SaveLastFmKey(key) => self.backend.send(Command::SetLastFmKey(key)),
             Action::SaveAiKey { provider, key } => {
                 self.backend.send(Command::SetAiKey { provider, key });
             }
@@ -24155,16 +24158,18 @@ mod tests {
         assert_eq!(app.artist_genres.get("a"), Some(&ArtistGenres::Loading));
         assert_eq!(app.artist_genres.get("b"), Some(&ArtistGenres::Loading));
 
-        app.handle_api(ApiResponse::ArtistGenres {
-            id: "a".into(),
-            result: Ok(vec!["hip hop".into(), "pop rap".into()]),
-        });
-        app.handle_api(ApiResponse::ArtistGenres {
-            id: "b".into(),
-            result: Err(crate::api::ApiError::Network("down".into())),
-        });
+        app.handle_backend_events(vec![
+            Event::ArtistGenres {
+                id: "a".into(),
+                result: Ok(vec!["hip hop".into(), "r&b".into()]),
+            },
+            Event::ArtistGenres {
+                id: "b".into(),
+                result: Err("MusicBrainz answered 503".into()),
+            },
+        ]);
         let now = app.now_playing().unwrap();
-        assert_eq!(app.playing_genres(&now), "Hip Hop, Pop Rap");
+        assert_eq!(app.playing_genres(&now), "Hip Hop, R&B");
 
         // A fresh failure waits; an old one is asked again.
         app.request_playing_genres();
@@ -24175,6 +24180,17 @@ mod tests {
         );
         app.request_playing_genres();
         assert_eq!(app.artist_genres.get("b"), Some(&ArtistGenres::Loading));
+        assert!(matches!(app.artist_genres["a"], ArtistGenres::Known(_)));
+
+        // Saving a Last.fm key asks again for the artists nobody knew.
+        app.artist_genres
+            .insert("b".into(), ArtistGenres::Known(Vec::new()));
+        app.lyrics_ai.keys = Some(crate::lyrics_ai::KeysPresent::default());
+        app.handle_backend_events(vec![Event::AiKeys(Ok(crate::lyrics_ai::KeysPresent {
+            lastfm: true,
+            ..Default::default()
+        }))]);
+        assert!(!app.artist_genres.contains_key("b"));
         assert!(matches!(app.artist_genres["a"], ArtistGenres::Known(_)));
         app.backend.shutdown();
     }
@@ -36538,6 +36554,7 @@ mod tests {
         app.lyrics_ai.keys = Some(crate::lyrics_ai::KeysPresent {
             gemini: true,
             openai: false,
+            lastfm: false,
         });
         app.request_lyrics_extras();
         let id = app

@@ -16,6 +16,8 @@ pub mod demo;
 pub mod device_history;
 pub mod emoji;
 pub mod eq;
+/// Fork: artists' genres for the player bar, from MusicBrainz and Last.fm.
+pub mod genres;
 pub mod history;
 pub mod http;
 #[cfg(target_os = "linux")]

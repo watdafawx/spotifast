@@ -328,10 +328,6 @@ pub enum ApiRequest {
     RelatedArtists {
         id: String,
     },
-    /// An artist's genres for the player bar's genre line.
-    ArtistGenres {
-        id: String,
-    },
     Album {
         id: String,
     },
@@ -415,7 +411,6 @@ impl ApiRequest {
                 | Self::MyPlaylists { .. }
                 | Self::PlaylistSample { .. }
                 | Self::Contains { .. }
-                | Self::ArtistGenres { .. }
         )
     }
 }
@@ -599,10 +594,6 @@ pub enum ApiResponse {
         id: String,
         result: ApiResult<Vec<Artist>>,
     },
-    ArtistGenres {
-        id: String,
-        result: ApiResult<Vec<String>>,
-    },
     Album {
         id: String,
         result: ApiResult<Album>,
@@ -734,6 +725,10 @@ pub enum Command {
         Box<crate::lyrics_video::Request>,
         crate::lyrics_video::Choice,
     ),
+    /// Fork: an artist's genres for the player bar (`crate::genres`).
+    ArtistGenres(crate::genres::Request),
+    /// Fork: save the Last.fm key genres use; an empty key removes it.
+    SetLastFmKey(crate::lyrics_ai::SecretKey),
     /// Fork: read which AI keys are saved, for the settings page.
     LoadAiKeys,
     /// Fork: save a provider's AI key; an empty key removes it.
@@ -1027,6 +1022,12 @@ pub enum Event {
     LocalFiles {
         folder: std::path::PathBuf,
         uris: Arc<std::collections::HashMap<String, std::path::PathBuf>>,
+    },
+    /// Fork: an artist's genres, most fitting first; an error is worth
+    /// asking again later.
+    ArtistGenres {
+        id: String,
+        result: Result<Vec<String>, String>,
     },
     /// Fork: the extra lines for the lyrics request with this id.
     LyricsExtras {
@@ -1999,7 +2000,11 @@ struct Worker {
     /// Fork: extra-line requests waiting for the AI keys.
     ai_waiting: Vec<crate::lyrics_ai::Request>,
     /// Fork: keys typed before the saved ones were read, applied after.
-    ai_key_edits: Vec<(crate::lyrics_ai::Provider, crate::lyrics_ai::SecretKey)>,
+    ai_key_edits: Vec<(crate::lyrics_ai::KeyFor, crate::lyrics_ai::SecretKey)>,
+    /// Genre lookups waiting for the saved keys, for the Last.fm one.
+    genres_waiting: Vec<crate::genres::Request>,
+    /// Keeps MusicBrainz requests a second apart.
+    genre_gate: crate::genres::Gate,
 }
 
 /// A failed Connect probe setup must still reconcile departed provisional rows.
@@ -2103,6 +2108,8 @@ impl Worker {
             ai_keys_loading: false,
             ai_waiting: Vec::new(),
             ai_key_edits: Vec::new(),
+            genres_waiting: Vec::new(),
+            genre_gate: crate::genres::Gate::default(),
         }
     }
 
@@ -2809,7 +2816,13 @@ impl Worker {
                 Command::ChooseLyricsVideo(request, choice) => {
                     self.find_lyrics_video(*request, Some(choice));
                 }
-                Command::SetAiKey { provider, key } => self.set_ai_key(provider, key),
+                Command::SetAiKey { provider, key } => {
+                    self.set_ai_key(crate::lyrics_ai::KeyFor::Ai(provider), key);
+                }
+                Command::SetLastFmKey(key) => {
+                    self.set_ai_key(crate::lyrics_ai::KeyFor::LastFm, key);
+                }
+                Command::ArtistGenres(request) => self.fetch_artist_genres(request),
                 Command::AiKeysLoaded { lease, result } => self.on_ai_keys_loaded(lease, result),
                 #[cfg(feature = "mods")]
                 Command::Mods(request) => {
@@ -4888,6 +4901,39 @@ impl Worker {
         });
     }
 
+    /// Looks up an artist's genres, once the saved keys say whether Last.fm
+    /// can fill in for MusicBrainz.
+    fn fetch_artist_genres(&mut self, request: crate::genres::Request) {
+        let Some(keys) = &self.ai_keys else {
+            self.genres_waiting.push(request);
+            self.load_ai_keys();
+            return;
+        };
+        let lastfm = Some(keys.lastfm.trim().to_string()).filter(|key| !key.is_empty());
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let gate = self.genre_gate.clone();
+        let cache_dir = self.dirs.genre_cache_dir();
+        tokio::spawn(async move {
+            let result = match http {
+                Ok(http) => {
+                    crate::genres::fetch(&http, &gate, &cache_dir, &request, lastfm.as_deref())
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = &result {
+                log::warn!("genres for artist {} unavailable: {error}", request.id);
+            }
+            let _ = events.send(Event::ArtistGenres {
+                id: request.id,
+                result,
+            });
+            waker.wake();
+        });
+    }
+
     fn find_word_timing(&self, request: crate::word_timing::Request) {
         let http = self.http.client();
         let events = self.events.clone();
@@ -4974,27 +5020,26 @@ impl Worker {
         };
         self.emit(Event::AiKeys(Ok(keys.present())));
         self.ai_keys = Some(keys);
-        for (provider, key) in std::mem::take(&mut self.ai_key_edits) {
-            self.set_ai_key(provider, key);
+        for (which, key) in std::mem::take(&mut self.ai_key_edits) {
+            self.set_ai_key(which, key);
+        }
+        for request in std::mem::take(&mut self.genres_waiting) {
+            self.fetch_artist_genres(request);
         }
         for request in std::mem::take(&mut self.ai_waiting) {
             self.fetch_lyrics_extras(request);
         }
     }
 
-    fn set_ai_key(
-        &mut self,
-        provider: crate::lyrics_ai::Provider,
-        key: crate::lyrics_ai::SecretKey,
-    ) {
+    fn set_ai_key(&mut self, which: crate::lyrics_ai::KeyFor, key: crate::lyrics_ai::SecretKey) {
         // The other provider's saved key must survive, so read the saved
         // keys before changing one.
         let Some(mut keys) = self.ai_keys.clone() else {
-            self.ai_key_edits.push((provider, key));
+            self.ai_key_edits.push((which, key));
             self.load_ai_keys();
             return;
         };
-        keys.set(provider, key.0.trim().to_string());
+        keys.set_for(which, key.0.trim().to_string());
         self.emit(Event::AiKeys(Ok(keys.present())));
         let operation = if keys.is_empty() {
             if let Err(error) = self.credentials.revoke(CredentialSlot::AiKeys) {
@@ -5370,7 +5415,6 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::RelatedArtists { .. } => Operation::RelatedArtists,
         ApiRequest::Recommendations { .. } => Operation::UnsupportedDevelopmentMode,
         ApiRequest::Artist { .. }
-        | ApiRequest::ArtistGenres { .. }
         | ApiRequest::ArtistAlbums { .. }
         | ApiRequest::Album { .. }
         | ApiRequest::AlbumTracks { .. }
@@ -6120,10 +6164,6 @@ async fn handle(
         },
         ApiRequest::Artist { id } => ApiResponse::Artist {
             result: routed!(artist(&id)),
-            id,
-        },
-        ApiRequest::ArtistGenres { id } => ApiResponse::ArtistGenres {
-            result: routed!(artist(&id)).map(|artist| artist.genres),
             id,
         },
         ApiRequest::ArtistTopTracks { id, generation } => ApiResponse::ArtistTopTracks {

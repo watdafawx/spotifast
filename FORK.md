@@ -88,12 +88,22 @@ the mods webview. The fork rebuilds the ones worth keeping natively:
 
 - **Genres in the player bar.** A dim line under the playing song's artist
   names shows up to three of its artists' genres, the first artist's first
-  (`App::playing_genres`). They come from the Web API's artist object, the
-  same one the artist page reads, fetched once per artist on the backend
-  (`ApiRequest::ArtistGenres`) and kept for the session; a failed request
-  is tried again after five minutes. Spotify lists no genres for many
-  artists, and then the line is hidden. Settings → Appearance → Genres in
-  player bar turns it off (`player_bar_genres`, on by default).
+  (`App::playing_genres`). Spotify no longer gives genres to apps outside
+  its own clients: the Web API answers `"genres": []` for every artist and
+  librespot's artist metadata dropped the field. So the backend
+  (`src/genres.rs`, `Command::ArtistGenres`) finds the artist on
+  [MusicBrainz](https://musicbrainz.org) by its Spotify URL and takes its
+  most voted genres, one request a second as MusicBrainz asks. When
+  MusicBrainz has none and a Last.fm API key is saved, Last.fm's top tags
+  for the artist's name fill in, with tags such as "seen live" left out.
+  Answers are kept in `genres` in the cache folder for 30 days (misses for
+  3, or until a Last.fm key is saved); a failed lookup is tried again after
+  five minutes. When nobody knows the artist the line is hidden. Settings →
+  Genres turns the line off (`player_bar_genres`, on by default) and takes
+  the Last.fm key, which is kept in the credential store with the AI keys.
+  Genres Spotify does list (artist pages of apps it still serves) are used
+  as they are.
+
 ## Lyrics translation and pronunciation (native)
 
 The first step in replacing the ivLyrics webview with native code, and
