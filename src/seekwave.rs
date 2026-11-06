@@ -349,6 +349,11 @@ pub struct SeekWave {
     /// The session the cached file's key is asked of, set while an engine
     /// is connected.
     session: Mutex<Option<librespot_core::Session>>,
+    /// Woken when the picture is turned on, so the song already playing is
+    /// completed too, not only the next one.
+    turned_on: tokio::sync::Notify,
+    /// The generation whose completion has started, so it starts once.
+    claimed: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -402,7 +407,12 @@ impl SeekWave {
 
     /// Turns the work on or off. Off forgets the song, freeing its picture.
     pub fn set_enabled(&self, enabled: bool) {
-        if self.enabled.swap(enabled, Ordering::Relaxed) != enabled && !enabled {
+        if self.enabled.swap(enabled, Ordering::Relaxed) == enabled {
+            return;
+        }
+        if enabled {
+            self.turned_on.notify_one();
+        } else {
             let mut inner = self.inner();
             let generation = inner.generation + 1;
             *inner = Inner {
@@ -410,6 +420,17 @@ impl SeekWave {
                 ..Inner::default()
             };
         }
+    }
+
+    /// Waits until the picture is turned on.
+    pub async fn turned_on(&self) {
+        self.turned_on.notified().await;
+    }
+
+    /// True the first time it is asked for `generation`: its completion
+    /// starts once, whether a song change or turning the picture on asks.
+    pub fn claim(&self, generation: u64) -> bool {
+        self.claimed.swap(generation, Ordering::Relaxed) != generation
     }
 
     pub fn set_session(&self, session: Option<librespot_core::Session>) {
@@ -861,5 +882,26 @@ mod tests {
         wave.refresh(uri, &mut view);
         let levels = view.levels.unwrap();
         assert!(levels.shaped && levels.is_complete());
+    }
+
+    #[test]
+    fn turning_the_picture_on_wakes_the_player_and_each_song_starts_once() {
+        let wave = Arc::new(SeekWave::default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        wave.set_enabled(true);
+        // The wake is kept for a waiter that comes later.
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), wave.turned_on())
+                .await
+                .expect("turning on wakes the player");
+        });
+        let generation = wave.follow("spotify:track:a", 1000, 0);
+        assert!(wave.claim(generation));
+        assert!(!wave.claim(generation));
+        let next = wave.follow("spotify:track:b", 1000, 0);
+        assert!(wave.claim(next));
     }
 }

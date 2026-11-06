@@ -674,10 +674,7 @@ impl Engine {
             Arc::clone(&state),
             Arc::clone(notify),
             Arc::clone(&audio),
-            SeekWaveFeed {
-                wave: Arc::clone(&config.tap.seek_wave),
-                eq: Arc::clone(&config.eq),
-            },
+            SeekWaveFeed::start(Arc::clone(&config.tap.seek_wave), Arc::clone(&config.eq)),
         ));
         Ok((player, mixer, state, audio))
     }
@@ -1111,24 +1108,51 @@ async fn run_events(
 struct SeekWaveFeed {
     wave: Arc<crate::seekwave::SeekWave>,
     eq: crate::eq::SharedEq,
+    /// The song the player last changed to, for when the picture is turned
+    /// on partway through it.
+    playing: Arc<Mutex<Option<AudioItem>>>,
 }
 
 impl SeekWaveFeed {
+    /// Feeds `wave`, and completes the playing song's picture whenever it
+    /// is turned on, until the player's events end.
+    fn start(wave: Arc<crate::seekwave::SeekWave>, eq: crate::eq::SharedEq) -> Self {
+        let feed = Self {
+            wave,
+            eq,
+            playing: Arc::default(),
+        };
+        let (wave, eq, playing) = (
+            Arc::clone(&feed.wave),
+            Arc::clone(&feed.eq),
+            Arc::downgrade(&feed.playing),
+        );
+        tokio::spawn(async move {
+            loop {
+                wave.turned_on().await;
+                let Some(playing) = playing.upgrade() else {
+                    return;
+                };
+                let item = playing.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                if let Some(item) = item {
+                    start_seek_wave(&wave, &eq, &item);
+                }
+            }
+        });
+        feed
+    }
+
     fn handle_player_event(&self, event: &PlayerEvent) {
+        if let PlayerEvent::TrackChanged { audio_item } = event {
+            *self.playing.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(audio_item.as_ref().clone());
+        }
         if !self.wave.enabled() {
             return;
         }
         match event {
             PlayerEvent::TrackChanged { audio_item } => {
-                let generation = self.wave.follow(&audio_item.uri, audio_item.duration_ms, 0);
-                if self.wave.wants(generation) {
-                    tokio::spawn(complete_seek_wave(
-                        Arc::clone(&self.wave),
-                        generation,
-                        audio_item.as_ref().clone(),
-                        Arc::clone(&self.eq),
-                    ));
-                }
+                start_seek_wave(&self.wave, &self.eq, audio_item);
             }
             PlayerEvent::Loading {
                 track_id,
@@ -1152,6 +1176,23 @@ impl SeekWaveFeed {
             } => self.wave.anchor(&track_id.to_uri(), *position_ms),
             _ => {}
         }
+    }
+}
+
+/// Follows the song in `item` and starts completing its picture, once.
+fn start_seek_wave(
+    wave: &Arc<crate::seekwave::SeekWave>,
+    eq: &crate::eq::SharedEq,
+    item: &AudioItem,
+) {
+    let generation = wave.follow(&item.uri, item.duration_ms, 0);
+    if wave.wants(generation) && wave.claim(generation) {
+        tokio::spawn(complete_seek_wave(
+            Arc::clone(wave),
+            generation,
+            item.clone(),
+            Arc::clone(eq),
+        ));
     }
 }
 
