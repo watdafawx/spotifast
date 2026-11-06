@@ -11,9 +11,103 @@ use crate::theme::{self, Palette};
 
 use super::widgets;
 
-/// Draws line `index`'s pronunciation and translation below it, in `size`
-/// and dimmed from `color`, and returns the rect they cover, so following
-/// the song keeps the whole group in view.
+/// Draws lyric line `index` with its pronunciation above it: each word's
+/// reading centred over that word when the words could be matched, else
+/// the whole reading as a small line on top. `None` when there is no
+/// pronunciation to show, and the caller draws the line as usual.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lyric_line(
+    app: &App,
+    ui: &mut egui::Ui,
+    index: usize,
+    text: &str,
+    font: FontId,
+    reading_size: f32,
+    color: Color32,
+    sense: egui::Sense,
+) -> Option<egui::Response> {
+    let uri = app.lyrics_uri.as_deref();
+    let settings = &app.settings.lyrics_ai;
+    let words = app.lyrics_ai.words(uri, index, settings);
+    let (pronunciation, _) = app.lyrics_ai.line(uri, index, settings);
+    if words.is_none() && pronunciation.is_none() {
+        return None;
+    }
+    let reading_font = theme::regular(reading_size);
+    let reading_color = color.gamma_multiply(0.85);
+    let drawn = ui.scope(|ui| match words {
+        Some(words) if !crate::bidi::is_rtl(text) => {
+            ruby(ui, words, &font, &reading_font, color, reading_color);
+        }
+        _ => {
+            if let Some(pronunciation) = pronunciation {
+                line(ui, pronunciation, reading_font.clone(), reading_color);
+            }
+            line(ui, text, font.clone(), color);
+        }
+    });
+    let response = ui.interact(
+        drawn.response.rect,
+        ui.id().with(("lyric-line", index)),
+        sense,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    Some(response)
+}
+
+/// Each word with its reading above it, wrapping word by word.
+fn ruby(
+    ui: &mut egui::Ui,
+    words: &[crate::lyrics_ai::Ruby],
+    font: &FontId,
+    reading_font: &FontId,
+    color: Color32,
+    reading_color: Color32,
+) {
+    let painter = ui.painter().clone();
+    let space = painter
+        .layout_no_wrap(" ".into(), font.clone(), color)
+        .size()
+        .x;
+    // Every word keeps a reading row, read or not, so words line up.
+    let reading_height = painter
+        .layout_no_wrap("Ag".into(), reading_font.clone(), reading_color)
+        .size()
+        .y;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
+        for word in words {
+            let main = painter.layout_no_wrap(word.text.clone(), font.clone(), color);
+            let reading = word.reading.as_ref().map(|reading| {
+                painter.layout_no_wrap(reading.clone(), reading_font.clone(), reading_color)
+            });
+            let width = main
+                .size()
+                .x
+                .max(reading.as_ref().map_or(0.0, |galley| galley.size().x));
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(width, reading_height + main.size().y),
+                egui::Sense::hover(),
+            );
+            if let Some(reading) = reading {
+                let at = egui::pos2(rect.center().x - reading.size().x / 2.0, rect.top());
+                ui.painter().galley(at, reading, reading_color);
+            }
+            let at = egui::pos2(
+                rect.center().x - main.size().x / 2.0,
+                rect.top() + reading_height,
+            );
+            ui.painter().galley(at, main, color);
+            if word.space {
+                ui.add_space(space);
+            }
+        }
+    });
+}
+
+/// Draws line `index`'s translation below it, in `size` and dimmed from
+/// `color`, and returns the rect it covers, so following the song keeps
+/// the whole group in view.
 pub(super) fn under_line(
     app: &App,
     ui: &mut egui::Ui,
@@ -21,18 +115,10 @@ pub(super) fn under_line(
     size: f32,
     color: Color32,
 ) -> Option<Rect> {
-    let (pronunciation, translation) =
+    let (_, translation) =
         app.lyrics_ai
             .line(app.lyrics_uri.as_deref(), index, &app.settings.lyrics_ai);
-    let mut covered: Option<Rect> = None;
-    for (text, dim) in [(pronunciation, 0.85), (translation, 0.7)] {
-        let Some(text) = text else {
-            continue;
-        };
-        let rect = line(ui, text, theme::regular(size), color.gamma_multiply(dim));
-        covered = Some(covered.map_or(rect, |held| held.union(rect)));
-    }
-    covered
+    translation.map(|text| line(ui, text, theme::regular(size), color.gamma_multiply(0.7)))
 }
 
 fn line(ui: &mut egui::Ui, text: &str, font: FontId, color: Color32) -> Rect {

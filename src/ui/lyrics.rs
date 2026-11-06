@@ -255,7 +255,20 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     Sense::hover()
                 };
-                let response = if crate::bidi::is_rtl(text) {
+                // Fork: with its pronunciation above, word by word.
+                let ruby = super::lyrics_ai::lyric_line(
+                    app,
+                    ui,
+                    index,
+                    text,
+                    font.clone(),
+                    13.0,
+                    color,
+                    sense,
+                );
+                let response = if let Some(response) = ruby {
+                    response
+                } else if crate::bidi::is_rtl(text) {
                     let galley = crate::bidi::layout(
                         ui.painter(),
                         text,
@@ -958,8 +971,15 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 // Untimed words have nowhere to jump to, but a click on them
                 // is still on a line, so it must not reach the backdrop.
                 let sense = Sense::click();
-                let galley =
-                    crate::bidi::layout(ui.painter(), text, font, color, wrap, usize::MAX, None);
+                let galley = crate::bidi::layout(
+                    ui.painter(),
+                    text,
+                    font.clone(),
+                    color,
+                    wrap,
+                    usize::MAX,
+                    None,
+                );
                 let center = ui.cursor().top() + galley.size().y * 0.5;
                 let edge = ((center - viewport.top()).min(viewport.bottom() - center)
                     / (size * 2.0))
@@ -967,7 +987,18 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 let (response, extra) = ui
                     .scope(|ui| {
                         ui.multiply_opacity(edge * edge * (3.0 - 2.0 * edge));
-                        let response = ui.add(egui::Label::new(galley).sense(sense));
+                        // Fork: with its pronunciation above, word by word.
+                        let response = super::lyrics_ai::lyric_line(
+                            app,
+                            ui,
+                            index,
+                            text,
+                            font.clone(),
+                            (size * 0.42).max(14.0),
+                            color,
+                            sense,
+                        )
+                        .unwrap_or_else(|| ui.add(egui::Label::new(galley).sense(sense)));
                         // Fork: pronunciation and translation under the line.
                         let extra = super::lyrics_ai::under_line(
                             app,

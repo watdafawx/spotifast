@@ -36423,6 +36423,7 @@ mod tests {
                 crate::lyrics_ai::Extra {
                     pronunciation: Some("yume naraba dorehodo yokatta deshou".into()),
                     translation: Some("If only it were a dream".into()),
+                    words: None,
                 },
                 crate::lyrics_ai::Extra::default(),
             ],

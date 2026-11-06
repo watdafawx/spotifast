@@ -572,6 +572,18 @@ impl State {
         )
     }
 
+    /// Line `index` cut into words with their readings, when pronunciation
+    /// is on and the words could be matched to the line.
+    pub fn words(&self, uri: Option<&str>, index: usize, settings: &AiSettings) -> Option<&[Ruby]> {
+        if !settings.pronounce || uri.is_none() || self.uri.as_deref() != uri {
+            return None;
+        }
+        self.extras
+            .as_ref()
+            .and_then(|extras| extras.line(index))
+            .and_then(|extra| extra.words.as_deref())
+    }
+
     /// Forget the last answer's failure so the next chance asks again.
     pub fn retry(&mut self) {
         if self.error.is_some() || self.unanswered {
@@ -592,6 +604,106 @@ pub struct Extra {
     pub pronunciation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<String>,
+    /// The line cut into words, each with its reading, so the reading can
+    /// sit above its own word. `None` when the pieces could not be matched
+    /// to the line; the whole-line pronunciation is shown then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<Ruby>>,
+}
+
+/// One piece of a lyric line and how it is pronounced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ruby {
+    pub text: String,
+    /// `None` for a piece already in the Latin alphabet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading: Option<String>,
+    /// The line has a space after this piece.
+    #[serde(default)]
+    pub space: bool,
+}
+
+/// Matches a model's `words` to the line they came from: every piece must
+/// be found in order, and only spaces and punctuation may lie between
+/// them (kept as pieces without a reading). Unread pieces with spaces in
+/// them are cut into words, so a long English hook can still wrap.
+pub fn align(line: &str, words: &[Ruby]) -> Option<Vec<Ruby>> {
+    fn push_plain(out: &mut Vec<Ruby>, text: &str) {
+        let mut pieces = text.split_whitespace().peekable();
+        if text.starts_with(char::is_whitespace)
+            && let Some(last) = out.last_mut()
+        {
+            last.space = true;
+        }
+        while let Some(piece) = pieces.next() {
+            out.push(Ruby {
+                text: piece.to_string(),
+                reading: None,
+                space: pieces.peek().is_some(),
+            });
+        }
+        if text.ends_with(char::is_whitespace)
+            && let Some(last) = out.last_mut()
+        {
+            last.space = true;
+        }
+    }
+    let mut out: Vec<Ruby> = Vec::new();
+    let mut rest = line.trim();
+    for word in words {
+        let text = word.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let at = rest.find(text)?;
+        let skipped = &rest[..at];
+        if skipped.chars().any(char::is_alphanumeric) {
+            return None;
+        }
+        push_plain(&mut out, skipped);
+        let reading = word
+            .reading
+            .as_deref()
+            .map(str::trim)
+            .filter(|reading| !reading.is_empty() && !same_words(reading, text));
+        match reading {
+            Some(reading) => out.push(Ruby {
+                text: text.to_string(),
+                reading: Some(reading.to_string()),
+                space: false,
+            }),
+            None => push_plain(&mut out, text),
+        }
+        rest = &rest[at + text.len()..];
+    }
+    if rest.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    push_plain(&mut out, rest);
+    out.iter()
+        .any(|piece| piece.reading.is_some())
+        .then_some(out)
+}
+
+/// Pairs a line and its pronunciation word by word, for an answer without
+/// usable `words`: Korean and most other spaced scripts romanize one word
+/// to one word.
+fn align_by_spaces(line: &str, pronunciation: &str) -> Option<Vec<Ruby>> {
+    let originals: Vec<&str> = line.split_whitespace().collect();
+    let readings: Vec<&str> = pronunciation.split_whitespace().collect();
+    if originals.len() != readings.len() || originals.len() < 2 {
+        return None;
+    }
+    let words: Vec<Ruby> = originals
+        .iter()
+        .zip(&readings)
+        .map(|(text, reading)| Ruby {
+            text: text.to_string(),
+            reading: Some(reading.to_string()),
+            space: false,
+        })
+        .collect();
+    align(line, &words)
 }
 
 /// One [`Extra`] per lyric line, in the lyrics' order.
@@ -701,6 +813,7 @@ fn prompt(request: &Request, distinct: &[&str]) -> (String, String) {
     let mut fields = Vec::new();
     if request.wanted.pronunciation {
         fields.push("\"pronunciation\": string or null");
+        fields.push("\"words\": [[original, reading or null], ...]");
     }
     if request.wanted.translation {
         fields.push("\"translation\": string or null");
@@ -719,6 +832,13 @@ fn prompt(request: &Request, distinct: &[&str]) -> (String, String) {
              Revised Romanization for Korean, Hanyu Pinyin with tone marks for Chinese, the \
              usual transliteration for any other script. Keep words already in the Latin \
              alphabet as they are. null for a line written entirely in the Latin alphabet.\n",
+        );
+        user.push_str(
+            "- words: the same line cut into its words, in order, each as [original, reading]. \
+             original is copied exactly from the line, so the originals rebuild it; reading is \
+             that word's part of the pronunciation, or null for a word already in the Latin \
+             alphabet. Cut Japanese and Chinese into words too, keeping kanji with their \
+             okurigana.\n",
         );
     }
     if request.wanted.translation {
@@ -951,12 +1071,38 @@ pub fn parse(text: &str, count: usize) -> Result<Parsed, String> {
         };
         slot.pronunciation = field(&["pronunciation", "romanization", "phonetic"]);
         slot.translation = field(&["translation"]);
+        slot.words = item
+            .get("words")
+            .and_then(|words| words.as_array())
+            .map(|words| words.iter().filter_map(ruby_piece).collect());
         filled += 1;
     }
     if filled == 0 && count > 0 {
         return Err("the AI answer had no lines".into());
     }
     Ok(Parsed { language, lines })
+}
+
+/// `["원문", "reading"]`, or `{"text": .., "reading": ..}` from a model
+/// that prefers objects.
+fn ruby_piece(value: &serde_json::Value) -> Option<Ruby> {
+    let (text, reading) = match value {
+        serde_json::Value::Array(pair) => (pair.first()?, pair.get(1)),
+        serde_json::Value::Object(fields) => (
+            fields.get("text").or_else(|| fields.get("original"))?,
+            fields
+                .get("reading")
+                .or_else(|| fields.get("pronunciation")),
+        ),
+        _ => return None,
+    };
+    Some(Ruby {
+        text: text.as_str()?.to_string(),
+        reading: reading
+            .and_then(|reading| reading.as_str())
+            .map(str::to_string),
+        space: false,
+    })
 }
 
 fn number(value: &serde_json::Value) -> Option<usize> {
@@ -1006,11 +1152,20 @@ fn spread(request: &Request, distinct: &[&str], parsed: Parsed) -> Extras {
             };
             let differs =
                 |text: &Option<String>| text.clone().filter(|text| !same_words(text, original));
+            let pronunciation =
+                differs(&extra.pronunciation).filter(|_| request.wanted.pronunciation);
+            let words = pronunciation.as_ref().and_then(|pronunciation| {
+                extra
+                    .words
+                    .as_deref()
+                    .and_then(|words| align(original, words))
+                    .or_else(|| align_by_spaces(original, pronunciation))
+            });
             Extra {
-                pronunciation: differs(&extra.pronunciation)
-                    .filter(|_| request.wanted.pronunciation),
+                pronunciation,
                 translation: differs(&extra.translation)
                     .filter(|_| request.wanted.translation && !same_language),
+                words,
             }
         })
         .collect();
@@ -1030,7 +1185,8 @@ fn same_words(a: &str, b: &str) -> bool {
 // ---- cache -----------------------------------------------------------------
 
 /// 2: answers for mixed-script songs no longer lose their translations.
-const CACHE_VERSION: u32 = 2;
+/// 3: readings word by word.
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
@@ -1172,11 +1328,97 @@ mod tests {
             lines: vec![Extra {
                 pronunciation: Some("hello SHÌJIÈ".into()),
                 translation: Some("hello, 世界!".into()),
+                words: None,
             }],
         };
         let extras = spread(&request, &distinct, parsed);
         assert!(extras.lines[0].pronunciation.is_some());
         assert_eq!(extras.lines[0].translation, None);
+    }
+
+    fn piece(text: &str, reading: Option<&str>) -> Ruby {
+        Ruby {
+            text: text.into(),
+            reading: reading.map(Into::into),
+            space: false,
+        }
+    }
+
+    fn shown(pieces: &[Ruby]) -> Vec<(String, Option<String>, bool)> {
+        pieces
+            .iter()
+            .map(|piece| (piece.text.clone(), piece.reading.clone(), piece.space))
+            .collect()
+    }
+
+    #[test]
+    fn readings_land_on_their_words_with_punctuation_and_spaces_kept() {
+        let words = [
+            piece("놀아보자", Some("noraboja")),
+            piece("얼쑤", Some("eolssu")),
+            piece("얼쑤", Some("eolssu")),
+        ];
+        let aligned = align("놀아보자 얼쑤 (얼쑤!)", &words).unwrap();
+        let r = |text: &str| Some(text.to_string());
+        assert_eq!(
+            shown(&aligned),
+            vec![
+                ("놀아보자".into(), r("noraboja"), true),
+                ("얼쑤".into(), r("eolssu"), true),
+                ("(".into(), None, false),
+                ("얼쑤".into(), r("eolssu"), false),
+                ("!)".into(), None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn unread_words_split_so_english_hooks_can_wrap() {
+        let words = [
+            piece("Let's go", None),
+            piece("삐걱", Some("ppigeok")),
+            piece("lose control", Some("lose control")),
+        ];
+        let aligned = align("Let's go 삐걱 lose control", &words).unwrap();
+        let texts: Vec<_> = aligned.iter().map(|piece| piece.text.as_str()).collect();
+        assert_eq!(texts, vec!["Let's", "go", "삐걱", "lose", "control"]);
+        assert!(aligned[1].space && aligned[2].space && aligned[3].space);
+        assert_eq!(
+            aligned[3].reading, None,
+            "a reading equal to the word is dropped"
+        );
+    }
+
+    #[test]
+    fn unspaced_scripts_align_and_bad_pieces_are_refused() {
+        let aligned = align(
+            "夢ならば",
+            &[piece("夢", Some("yume")), piece("ならば", Some("naraba"))],
+        )
+        .unwrap();
+        assert_eq!(aligned.len(), 2);
+        assert!(!aligned[0].space);
+        // A word the line does not have, or words skipped over.
+        assert_eq!(align("夢ならば", &[piece("雨", Some("ame"))]), None);
+        assert_eq!(align("夢ならば", &[piece("ならば", Some("naraba"))]), None);
+        // Nothing to read: plain text is drawn as before.
+        assert_eq!(align("Sit back", &[piece("Sit back", None)]), None);
+    }
+
+    #[test]
+    fn a_spaced_pronunciation_pairs_word_by_word_without_words() {
+        let aligned = align_by_spaces("까마디 까만 이", "kkamadi kkaman i").unwrap();
+        assert_eq!(aligned[1].reading.as_deref(), Some("kkaman"));
+        assert_eq!(align_by_spaces("까마디 까만", "kkamadi kkaman i"), None);
+        let parsed = parse(
+            r#"{"lines":[{"i":1,"pronunciation":"bureul jipyeora","words":[["불을","bureul"],["지펴라","jipyeora"]]}]}"#,
+            1,
+        )
+        .unwrap();
+        let request = request(&["불을 지펴라"], BOTH);
+        let extras = spread(&request, &request.distinct(), parsed);
+        let words = extras.lines[0].words.as_ref().unwrap();
+        assert_eq!(words[0].reading.as_deref(), Some("bureul"));
     }
 
     #[test]
@@ -1212,6 +1454,7 @@ mod tests {
             lines: vec![Extra {
                 pronunciation: None,
                 translation: Some("I love you".into()),
+                words: None,
             }],
         };
         assert_eq!(spread(&latin, &distinct, parsed).lines[0].translation, None);
@@ -1290,6 +1533,7 @@ mod tests {
                 Extra {
                     pronunciation: Some("saranghae".into()),
                     translation: Some("I love you".into()),
+                    words: None,
                 },
                 Extra::default(),
             ],
