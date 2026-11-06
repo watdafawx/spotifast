@@ -685,6 +685,42 @@ pub fn align(line: &str, words: &[Ruby]) -> Option<Vec<Ruby>> {
         .then_some(out)
 }
 
+fn is_han(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FFFF
+    )
+}
+
+/// Pairs a Chinese line with its pinyin character by character, for an
+/// answer whose `words` do not match the line (a model may copy them in
+/// the other script, simplified for traditional). Only for lines of Han
+/// characters and punctuation, where one syllable is one character.
+fn align_by_characters(line: &str, pronunciation: &str) -> Option<Vec<Ruby>> {
+    if line.chars().any(|c| c.is_alphanumeric() && !is_han(c)) {
+        return None;
+    }
+    let syllables: Vec<&str> = pronunciation
+        .split_whitespace()
+        .map(|syllable| syllable.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|syllable| !syllable.is_empty())
+        .collect();
+    if syllables.len() != line.chars().filter(|c| is_han(*c)).count() {
+        return None;
+    }
+    let mut syllables = syllables.into_iter();
+    let words: Vec<Ruby> = line
+        .chars()
+        .filter(|c| is_han(*c))
+        .map(|c| Ruby {
+            text: c.to_string(),
+            reading: syllables.next().map(str::to_string),
+            space: false,
+        })
+        .collect();
+    align(line, &words)
+}
+
 /// Pairs a line and its pronunciation word by word, for an answer without
 /// usable `words`: Korean and most other spaced scripts romanize one word
 /// to one word.
@@ -1170,6 +1206,7 @@ fn spread(request: &Request, distinct: &[&str], parsed: Parsed) -> Extras {
                     .as_deref()
                     .and_then(|words| align(original, words))
                     .or_else(|| align_by_spaces(original, pronunciation))
+                    .or_else(|| align_by_characters(original, pronunciation))
             });
             Extra {
                 pronunciation,
@@ -1197,7 +1234,8 @@ fn same_words(a: &str, b: &str) -> bool {
 /// 2: answers for mixed-script songs no longer lose their translations.
 /// 3: readings word by word.
 /// 4: shorter pieces, so readings do not run together.
-const CACHE_VERSION: u32 = 4;
+/// 5: Chinese lines whose pieces do not match pair character by character.
+const CACHE_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
@@ -1414,6 +1452,26 @@ mod tests {
         assert_eq!(align("夢ならば", &[piece("ならば", Some("naraba"))]), None);
         // Nothing to read: plain text is drawn as before.
         assert_eq!(align("Sit back", &[piece("Sit back", None)]), None);
+    }
+
+    #[test]
+    fn chinese_pairs_character_by_character_when_its_words_do_not_match() {
+        let aligned =
+            align_by_characters("沒想到 失去的勇氣？", "méi xiǎng dào shī qù de yǒng qì?").unwrap();
+        let texts: Vec<_> = aligned.iter().map(|piece| piece.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["沒", "想", "到", "失", "去", "的", "勇", "氣", "？"]
+        );
+        assert_eq!(aligned[7].reading.as_deref(), Some("qì"));
+        assert!(aligned[2].space);
+        // A syllable short, or a line with other letters in it: no guess.
+        assert_eq!(align_by_characters("沒想到", "méi xiǎng"), None);
+        assert_eq!(align_by_characters("夢ならば", "yu me na ra ba"), None);
+        assert_eq!(
+            align_by_characters("沒想到 yeah", "méi xiǎng dào yeah"),
+            None
+        );
     }
 
     #[test]
