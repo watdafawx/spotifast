@@ -511,12 +511,18 @@ fn already_in(lines: &[&str], target: &Language) -> bool {
 
 /// What to ask for: pronunciation unless the words are already in the
 /// Latin alphabet, translation unless they are already in the target
-/// language. `None` when there is nothing to ask.
+/// language. Both are asked for whichever switch is on, so turning the
+/// other on later shows it from the same answer instead of asking again;
+/// the switches only hide lines. `None` when both are off or there is
+/// nothing to ask.
 pub fn wanted(lines: &[&str], settings: &AiSettings, target: &Language) -> Option<Wanted> {
+    if !settings.pronounce && !settings.translate {
+        return None;
+    }
     let scripts = Scripts::of(lines.iter().copied());
     let wanted = Wanted {
-        pronunciation: settings.pronounce && scripts.non_latin() >= 5,
-        translation: settings.translate && !already_in(lines, target),
+        pronunciation: scripts.non_latin() >= 5,
+        translation: !already_in(lines, target),
     };
     (wanted.pronunciation || wanted.translation).then_some(wanted)
 }
@@ -815,14 +821,14 @@ pub struct Request {
 
 impl Request {
     /// What the answer depends on, so the app can tell a stale answer and
-    /// the cache can find a fresh one. The provider and model are left out:
-    /// any provider's answer for the same words serves.
+    /// the cache can find a fresh one: the words and the target language.
+    /// The track, provider and model are left out, so the same lyrics on a
+    /// single and its album, or asked of another provider, are answered
+    /// once.
     pub fn id(&self) -> String {
         let mut hasher = Sha1::new();
-        for part in [self.uri.as_str(), self.target] {
-            hasher.update(part.as_bytes());
-            hasher.update([0]);
-        }
+        hasher.update(self.target.as_bytes());
+        hasher.update([0]);
         hasher.update([
             u8::from(self.wanted.pronunciation),
             u8::from(self.wanted.translation),
@@ -1336,8 +1342,29 @@ struct Cached {
     extras: Extras,
 }
 
+/// The current format's folder. Answers in an older format can never be
+/// read again, so the first look at the cache in a run removes them.
 pub fn cache_dir(lyrics_cache: &Path) -> PathBuf {
-    lyrics_cache.join("extras")
+    let root = lyrics_cache.join("extras");
+    let current = root.join(format!("v{CACHE_VERSION}"));
+    static PRUNED: std::sync::Once = std::sync::Once::new();
+    PRUNED.call_once(|| {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == current {
+                continue;
+            }
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+        }
+    });
+    current
 }
 
 fn cache_path(cache_dir: &Path, request: &Request) -> PathBuf {
@@ -1751,6 +1778,13 @@ mod tests {
             ..AiSettings::default()
         };
         assert_eq!(wanted(&japanese, &off, en), None);
+        // One switch on asks for both, so the other shows later without a
+        // second request.
+        let translation_only = AiSettings {
+            pronounce: false,
+            ..AiSettings::default()
+        };
+        assert_eq!(wanted(&japanese, &translation_only, en), Some(BOTH));
     }
 
     #[test]
@@ -1800,6 +1834,10 @@ mod tests {
         let mut other_words = request.clone();
         other_words.lines[1] = "다른 말".into();
         assert_ne!(cache_path(&dir, &other_words), path);
+        // The same words on another track (a single and its album) too.
+        let mut other_track = request.clone();
+        other_track.uri = "spotify:track:single".into();
+        assert_eq!(cache_path(&dir, &other_track), path);
         // Another provider's answer for the same words serves.
         let mut other_provider = request.clone();
         other_provider.provider = Provider::OpenAiCompatible;
