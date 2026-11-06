@@ -483,6 +483,11 @@ pub struct Settings {
     /// Fork: a community-picked music video behind full-screen lyrics,
     /// where libmpv is installed (src/lyrics_video.rs).
     pub lyrics_video: bool,
+    /// Fork: the lyrics page's look and per-song lyrics offsets.
+    pub lyrics_page: crate::lyrics_page::PageSettings,
+    /// Fork: the webview mod (ivLyrics) and its page, in builds with mods.
+    /// Off by default; the native lyrics page replaces it.
+    pub mods_enabled: bool,
 }
 
 impl std::fmt::Debug for Settings {
@@ -598,6 +603,8 @@ impl Default for Settings {
             proxy_password_legacy: false,
             lyrics_ai: crate::lyrics_ai::AiSettings::default(),
             lyrics_video: true,
+            lyrics_page: crate::lyrics_page::PageSettings::default(),
+            mods_enabled: false,
         }
     }
 }

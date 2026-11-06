@@ -1206,6 +1206,8 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     // Fork: the mod's page, beside Spotifast's own lyrics.
     #[cfg(feature = "mods")]
     crate::mods::page_button(app, ui);
+    // Fork: the native lyrics page.
+    super::lyrics_page::button(app, ui);
     // The Listening activity button is the first to go in a narrow window,
     // so it never crowds the transport.
     let left = ui.min_rect().left() - ui.spacing().item_spacing.x - (18.0 + theme::ICON_BUTTON_PAD);

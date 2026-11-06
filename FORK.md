@@ -54,6 +54,10 @@ served from the binary (`src/mods/vendor/`), so the loader needs no CDN.
 
 ### ivLyrics
 
+Off by default since the native lyrics page replaced it: turn it on in
+Settings → Lyrics extras → ivLyrics (web mod). While off, its player-bar
+button is hidden and the webview never starts.
+
 Copy the ivLyrics folder (the one with `manifest.json`) into the mods
 folder as `mods/ivLyrics`. Lyrics, translation addons and its settings
 (toolbar → "ivLyrics config") work, and so do its Spotify lyrics provider
@@ -136,6 +140,31 @@ song) and stops 30 s after full screen closes. Settings: Lyrics extras →
 Video background. Needs `libmpv-2.dll` (shinchiro's mpv-winbuild) and a
 current `yt-dlp.exe` beside Spotifast or on PATH. ivLyrics' community
 video service is not used: it answers other apps with a warning video.
+
+## Lyrics page (native)
+
+`src/ui/lyrics_page.rs` and `src/lyrics_page.rs`, not behind the `mods`
+feature. A player-bar button (TV icon) opens a page that takes the main
+area below the top bar, as ivLyrics' page does: the music video (or the
+softened cover) behind, blurred by mpv on the GPU (a two-pass Gaussian
+user shader written to the cache folder) and dimmed, the lyrics centred
+with their readings and meanings, a rail of controls at the right
+(translation, pronunciation, video, blur/dimming/text size, centring,
+full screen) and the song's lyrics offset at the bottom left (-100 ms to
++100 ms steps, per track URI, applied in every lyrics view). Optional looks, all off by default (the
+appearance panel): the sung line Classic, in the cover's colour (Accent)
+or with lines fading by distance (Fade); words lighting up as they are
+sung (timed by Unison, unison.boidu.dev, the open crowdsourced API behind
+Better Lyrics, when it has the song word by word: asked by ISRC, matched
+to the shown lines by their letters, cached 30 days in `lyrics/words`;
+else estimated from the line's length); and only the sung line showing, sliding in and out. Animations and effects, all optional (src/ui/lyrics_fx.rs): how lines
+enter (fade, rise, typewriter, zoom) and leave (fade, drift up, zoom) in
+the single-line view, the sung line floating or pulsing, a glow on the
+sung line and an outline on all, dots through instrumental breaks (on by
+default), and slow colour blobs from the cover's colour when there is no
+video. The sung line sits in the middle of the page. Back or any
+navigation closes it. Settings live under `lyrics_page` in
+`settings.json`.
 
 ## Keeping up with upstream
 

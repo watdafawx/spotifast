@@ -725,8 +725,15 @@ pub enum Command {
     /// Fork: pronunciation and translation lines for a song's lyrics
     /// (src/lyrics_ai.rs).
     LyricsExtras(Box<crate::lyrics_ai::Request>),
+    /// Fork: word timing for a song (src/word_timing.rs).
+    FindWordTiming(Box<crate::word_timing::Request>),
     /// Fork: find the music video for a song (src/lyrics_video.rs).
     FindLyricsVideo(Box<crate::lyrics_video::Request>),
+    /// Fork: the listener picks a song's video, or none, or the search's.
+    ChooseLyricsVideo(
+        Box<crate::lyrics_video::Request>,
+        crate::lyrics_video::Choice,
+    ),
     /// Fork: read which AI keys are saved, for the settings page.
     LoadAiKeys,
     /// Fork: save a provider's AI key; an empty key removes it.
@@ -1028,6 +1035,11 @@ pub enum Event {
     },
     /// Fork: which AI keys are saved, or why storing one failed.
     AiKeys(Result<crate::lyrics_ai::KeysPresent, String>),
+    /// Fork: a song's word-timed lines, `None` when there are none.
+    WordTiming {
+        uri: String,
+        result: Result<Option<Vec<crate::word_timing::TimedLine>>, String>,
+    },
     /// Fork: the music video for a song, `None` when it has none.
     LyricsVideo {
         uri: String,
@@ -2792,7 +2804,11 @@ impl Worker {
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
                 Command::LyricsExtras(request) => self.fetch_lyrics_extras(*request),
                 Command::LoadAiKeys => self.load_ai_keys(),
-                Command::FindLyricsVideo(request) => self.find_lyrics_video(*request),
+                Command::FindLyricsVideo(request) => self.find_lyrics_video(*request, None),
+                Command::FindWordTiming(request) => self.find_word_timing(*request),
+                Command::ChooseLyricsVideo(request, choice) => {
+                    self.find_lyrics_video(*request, Some(choice));
+                }
                 Command::SetAiKey { provider, key } => self.set_ai_key(provider, key),
                 Command::AiKeysLoaded { lease, result } => self.on_ai_keys_loaded(lease, result),
                 #[cfg(feature = "mods")]
@@ -4872,12 +4888,44 @@ impl Worker {
         });
     }
 
-    fn find_lyrics_video(&self, request: crate::lyrics_video::Request) {
+    fn find_word_timing(&self, request: crate::word_timing::Request) {
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let cache_dir = crate::word_timing::cache_dir(&self.dirs.lyrics_cache_dir());
+        let engine = self.engine.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let http = http?;
+                // The ISRC finds the exact recording; without it, the name.
+                let isrc = track_isrc(engine, &request.uri).await.ok();
+                crate::word_timing::fetch(&http, &cache_dir, &request, isrc.as_deref()).await
+            }
+            .await;
+            if let Err(error) = &result {
+                log::debug!("word timing unavailable: {error}");
+            }
+            let _ = events.send(Event::WordTiming {
+                uri: request.uri,
+                result,
+            });
+            waker.wake();
+        });
+    }
+
+    fn find_lyrics_video(
+        &self,
+        request: crate::lyrics_video::Request,
+        choice: Option<crate::lyrics_video::Choice>,
+    ) {
         let events = self.events.clone();
         let waker = self.waker.clone();
         let cache_dir = crate::lyrics_video::cache_dir(&self.dirs.lyrics_cache_dir());
         tokio::task::spawn_blocking(move || {
-            let result = crate::lyrics_video::find(&cache_dir, &request);
+            let result = match &choice {
+                Some(choice) => crate::lyrics_video::choose(&cache_dir, &request, choice),
+                None => crate::lyrics_video::find(&cache_dir, &request),
+            };
             if let Err(error) = &result {
                 log::debug!("lyrics video unavailable: {error}");
             }
@@ -6584,6 +6632,22 @@ fn settle<T>(result: Result<T, session_reads::Failure>) -> Option<ApiResult<T>> 
             None
         }
     }
+}
+
+/// A track's ISRC from Spotify's own metadata.
+async fn track_isrc(engine: Option<Arc<Engine>>, uri: &str) -> Result<String, String> {
+    use librespot_metadata::{Metadata as _, Track};
+    let id = librespot_core::SpotifyUri::from_uri(uri).map_err(|error| error.to_string())?;
+    let engine = engine.ok_or("local playback is not signed in")?;
+    let track = Track::get(engine.session(), &id)
+        .await
+        .map_err(|error| error.to_string())?;
+    track
+        .external_ids
+        .iter()
+        .find(|external| external.external_type.eq_ignore_ascii_case("isrc"))
+        .map(|external| external.id.clone())
+        .ok_or_else(|| "Spotify has no ISRC for this track".to_string())
 }
 
 /// Spotify's transcription of the track, when the local session can ask for

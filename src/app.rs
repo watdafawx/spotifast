@@ -718,6 +718,12 @@ pub struct App {
     pub lyrics_ai: crate::lyrics_ai::State,
     /// Fork: the music video behind full-screen lyrics.
     pub lyrics_video: crate::lyrics_video::State,
+    /// Fork: the native lyrics page holds the main area.
+    pub lyrics_page_open: bool,
+    /// Fork: word timing for the word-by-word light.
+    pub word_timing: crate::word_timing::State,
+    /// Fork: when scrolling by hand last paused following.
+    pub lyrics_paused_at: Option<std::time::Instant>,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -1435,6 +1441,9 @@ impl App {
             lyrics_line_shown: None,
             lyrics_ai: Default::default(),
             lyrics_video: Default::default(),
+            lyrics_page_open: false,
+            word_timing: Default::default(),
+            lyrics_paused_at: None,
             show_devices: false,
             toasts: Vec::new(),
             actions: Vec::new(),
@@ -3083,6 +3092,14 @@ impl App {
                             Err(error) => self.lyrics_failed(error, Instant::now()),
                         };
                         self.request_lyrics_extras();
+                        self.request_word_timing();
+                    }
+                }
+                Event::WordTiming { uri, result } => {
+                    if self.word_timing.uri.as_deref() == Some(uri.as_str()) {
+                        self.word_timing.lines = Some(result.ok().flatten());
+                        self.word_timing.matched_for = None;
+                        self.match_word_timing();
                     }
                 }
                 Event::LyricsExtras { id, result } => self.receive_lyrics_extras(&id, result),
@@ -4403,7 +4420,7 @@ impl App {
         {
             self.refresh_queue(true);
         }
-        if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() {
+        if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() || self.lyrics_page_open {
             // Fullscreen shows lyrics without the panel flag when the
             // queue column is open; a track change must refresh them.
             self.request_lyrics();
@@ -4624,6 +4641,76 @@ impl App {
         }
         self.lyrics_ai.id = Some(id);
         self.backend.send(Command::LyricsExtras(Box::new(request)));
+    }
+
+    /// Fork: asks Unison for the playing lyrics' word timing, once per
+    /// song, while the word-by-word light is on.
+    pub fn request_word_timing(&mut self) {
+        if !self.settings.lyrics_page.word_highlight || self.offline {
+            return;
+        }
+        let Loadable::Loaded(Some(lyrics)) = &self.lyrics else {
+            return;
+        };
+        let Some(uri) = self.lyrics_uri.clone() else {
+            return;
+        };
+        if !lyrics.synced || self.word_timing.uri.as_deref() == Some(uri.as_str()) {
+            return;
+        }
+        let Some(now) = self.now_playing().filter(|now| now.uri == uri) else {
+            return;
+        };
+        self.word_timing = crate::word_timing::State {
+            uri: Some(uri.clone()),
+            ..Default::default()
+        };
+        self.backend.send(Command::FindWordTiming(Box::new(
+            crate::word_timing::Request {
+                uri,
+                title: now.title,
+                artist: now
+                    .artists
+                    .first()
+                    .map(|artist| artist.name.clone())
+                    .unwrap_or_default(),
+                album: now.album_name,
+                duration_ms: now.duration_ms,
+            },
+        )));
+    }
+
+    /// Fork: matches the timed lines to the lyrics on show, once each.
+    pub fn match_word_timing(&mut self) {
+        let Loadable::Loaded(Some(lyrics)) = &self.lyrics else {
+            return;
+        };
+        let (Some(uri), Some(Some(timed))) = (&self.lyrics_uri, &self.word_timing.lines) else {
+            return;
+        };
+        if self.word_timing.uri.as_ref() != Some(uri) {
+            return;
+        }
+        let key = Some((uri.clone(), lyrics.lines.len()));
+        if self.word_timing.matched_for == key {
+            return;
+        }
+        let shown: Vec<(Option<u32>, String)> = lyrics
+            .lines
+            .iter()
+            .map(|line| (line.at_ms, line.text.clone()))
+            .collect();
+        self.word_timing.matched = crate::word_timing::match_lines(&shown, timed);
+        self.word_timing.matched_for = key;
+        log::debug!(
+            "word timing: {} of {} lines timed word by word",
+            self.word_timing
+                .matched
+                .iter()
+                .filter(|line| line.is_some())
+                .count(),
+            shown.len()
+        );
     }
 
     fn receive_lyrics_extras(
@@ -12677,7 +12764,11 @@ impl App {
             self.supersede_play_search();
         }
         match action {
-            Action::Open(page) => self.open(page),
+            Action::Open(page) => {
+                // Fork: going to a page leaves the lyrics page.
+                self.lyrics_page_open = false;
+                self.open(page);
+            }
             Action::OpenSongRadio { uri, track } => self.open_song_radio(&uri, &track),
             Action::PrepareTint(url) => {
                 if self.settings.accent_from_art {
@@ -12698,6 +12789,10 @@ impl App {
                 self.actions.push(Action::ShowWindow);
             }
             Action::Back => {
+                // Fork: the lyrics page closes like a page of its own.
+                if std::mem::take(&mut self.lyrics_page_open) {
+                    return;
+                }
                 // Fork: the mod's page closes like a page of its own.
                 #[cfg(feature = "mods")]
                 if crate::mods::close_page() {
@@ -13569,7 +13664,7 @@ impl App {
             Action::LyricsLineShown(line) => {
                 // Escape or navigation may already have left the view earlier
                 // in this frame. The returning panel still needs to reposition.
-                if self.lyrics_fullscreen.is_some() {
+                if self.lyrics_fullscreen.is_some() || self.lyrics_page_open {
                     self.lyrics_line_shown = Some(line);
                 }
             }
@@ -13577,7 +13672,11 @@ impl App {
                 self.lyrics_following = true;
                 self.lyrics_line_shown = None;
             }
-            Action::PauseLyricsFollow => self.lyrics_following = false,
+            Action::PauseLyricsFollow => {
+                self.lyrics_following = false;
+                // Fork: following picks up again shortly after the scroll.
+                self.lyrics_paused_at = Some(std::time::Instant::now());
+            }
             Action::RetryLyrics => {
                 self.lyrics_retries = 0;
                 self.request_lyrics();
@@ -13739,6 +13838,24 @@ impl App {
                 self.settings_dirty = true;
                 ctx.set_theme(self.theme_preference());
                 self.request_lyrics_extras();
+                self.request_word_timing();
+            }
+            Action::ChooseLyricsVideo(choice) => {
+                if let Some(request) = crate::lyrics_video::request_for(self) {
+                    // Shown as loading until the backend answers.
+                    self.lyrics_video.uri = Some(request.uri.clone());
+                    self.lyrics_video.info = None;
+                    self.backend
+                        .send(Command::ChooseLyricsVideo(Box::new(request), choice));
+                }
+            }
+            Action::ToggleLyricsPage => {
+                self.lyrics_page_open = !self.lyrics_page_open;
+                if self.lyrics_page_open {
+                    self.lyrics_following = true;
+                    self.lyrics_line_shown = None;
+                    self.request_lyrics();
+                }
             }
             Action::RetryLyricsExtras => {
                 self.lyrics_ai.retry();

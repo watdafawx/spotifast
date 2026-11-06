@@ -212,7 +212,9 @@ pub fn close_page() -> bool {
 /// The player-bar button that opens and closes the mod's page, named after
 /// the mod. Nothing when no mod is ready.
 pub fn page_button(app: &App, ui: &mut egui::Ui) {
-    if !available() {
+    // Off unless the listener turns the mod on (Settings, Lyrics extras):
+    // the native lyrics page does its work without a webview.
+    if !available() || !app.settings.mods_enabled {
         return;
     }
     let Some(Some(name)) = MOD_NAME.get() else {
@@ -298,6 +300,10 @@ pub fn place(ui: &mut egui::Ui) -> bool {
 /// Once per frame: start the mods window, send it the playing item, and turn
 /// its commands into actions.
 pub fn sync(app: &mut App, ctx: &egui::Context) {
+    if !app.settings.mods_enabled {
+        // Turned off: close its page; the webview stops once idle.
+        PAGE_OPEN.store(false, Ordering::Relaxed);
+    }
     let mods = app.dirs.config.join("mods");
     MOD_NAME.get_or_init(|| has_page(&mods).then(|| page_name(&mods)));
     let reserved = reserved(ctx);

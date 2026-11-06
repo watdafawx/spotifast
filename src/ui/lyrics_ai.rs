@@ -16,6 +16,101 @@ use super::widgets;
 /// the whole reading as a small line on top. `None` when there is no
 /// pronunciation to show, and the caller draws the line as usual.
 #[allow(clippy::too_many_arguments)]
+/// Fork page: how far the sung line has got, to light its words up to there.
+#[derive(Clone, Debug)]
+pub(super) struct WordFill {
+    /// The estimate: how far through the line, 0 to 1.
+    pub progress: f32,
+    pub sung: Color32,
+    pub unsung: Color32,
+    /// Each character's time when Unison timed the line word by word.
+    pub times: Option<std::sync::Arc<Vec<(u32, u32)>>>,
+    /// The song's position (its lyrics offset applied), for `times`.
+    pub position: u32,
+}
+
+impl WordFill {
+    /// The colours of `segments`, pieces of `text` in order: from their
+    /// characters' real times when the line has them, else estimated.
+    fn colours_for<S: AsRef<str>>(&self, text: &str, segments: &[S]) -> Vec<Color32> {
+        if let Some(times) = &self.times
+            && times.len() == text.chars().count()
+        {
+            let mut from = 0usize;
+            let mut found = Vec::with_capacity(segments.len());
+            for segment in segments {
+                let segment = segment.as_ref();
+                let Some(byte) = text[from..].find(segment) else {
+                    found.clear();
+                    break;
+                };
+                let first = text[..from + byte].chars().count();
+                let count = segment.chars().count().max(1);
+                found.push((first, first + count - 1));
+                from += byte + segment.len();
+            }
+            if found.len() == segments.len() {
+                return found
+                    .into_iter()
+                    .map(|(first, last)| {
+                        let start = times[first].0;
+                        let end = times[last.min(times.len() - 1)].1.max(start + 1);
+                        let t = (self.position.saturating_sub(start)) as f32 / (end - start) as f32;
+                        super::lyrics::blend(self.unsung, self.sung, t.clamp(0.0, 1.0))
+                    })
+                    .collect();
+            }
+        }
+        self.colours(&crate::lyrics_page::word_ends(segments))
+    }
+
+    /// The colours of words ending at `ends` (shares of the line).
+    fn colours(&self, ends: &[f32]) -> Vec<Color32> {
+        let mut start = 0.0;
+        ends.iter()
+            .map(|end| {
+                let colour = if self.progress >= *end {
+                    self.sung
+                } else if self.progress <= start {
+                    self.unsung
+                } else {
+                    let t = (self.progress - start) / (end - start).max(0.001);
+                    super::lyrics::blend(self.unsung, self.sung, t)
+                };
+                start = *end;
+                colour
+            })
+            .collect()
+    }
+}
+
+/// `text` laid out with each word coloured by how far the singing has got.
+pub(super) fn filled_galley(
+    painter: &egui::Painter,
+    text: &str,
+    font: FontId,
+    wrap_width: f32,
+    fill: WordFill,
+) -> std::sync::Arc<egui::Galley> {
+    let words: Vec<&str> = text.split_inclusive(char::is_whitespace).collect();
+    let colours = fill.colours_for(text, &words);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+    for (word, colour) in words.iter().zip(colours) {
+        job.append(
+            word,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: colour,
+                ..Default::default()
+            },
+        );
+    }
+    painter.layout_job(job)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn lyric_line(
     app: &App,
     ui: &mut egui::Ui,
@@ -25,6 +120,7 @@ pub(super) fn lyric_line(
     reading_size: f32,
     color: Color32,
     sense: egui::Sense,
+    fill: Option<WordFill>,
 ) -> Option<egui::Response> {
     let uri = app.lyrics_uri.as_deref();
     let settings = &app.settings.lyrics_ai;
@@ -44,13 +140,23 @@ pub(super) fn lyric_line(
                 &reading_font,
                 color,
                 (settings.pronounce, settings.translate),
+                fill.as_ref().map(|fill| (fill, text)),
             );
         }
         _ => {
             if let Some(pronunciation) = pronunciation {
                 line(ui, pronunciation, reading_font.clone(), reading_color);
             }
-            line(ui, text, font.clone(), color);
+            match fill.filter(|_| !crate::bidi::is_rtl(text)) {
+                Some(fill) => {
+                    let galley =
+                        filled_galley(ui.painter(), text, font.clone(), ui.available_width(), fill);
+                    ui.add(egui::Label::new(galley));
+                }
+                None => {
+                    line(ui, text, font.clone(), color);
+                }
+            }
         }
     });
     let response = ui.interact(
@@ -71,7 +177,12 @@ fn ruby(
     reading_font: &FontId,
     color: Color32,
     shown: (bool, bool),
+    fill: Option<(&WordFill, &str)>,
 ) {
+    let fills = fill.map(|(fill, text)| {
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        fill.colours_for(text, &texts)
+    });
     let reading_color = color.gamma_multiply(0.85);
     let gloss_color = color.gamma_multiply(0.6);
     let painter = ui.painter().clone();
@@ -89,9 +200,44 @@ fn ruby(
     let glosses = shown.1 && words.iter().any(|word| word.gloss.is_some());
     let reading_height = if readings { row } else { 0.0 };
     let gloss_height = if glosses { row } else { 0.0 };
+    // Fork page: a line that fits on one row sits in the middle when the
+    // page centres its lines.
+    let centred = ui.layout().cross_align == egui::Align::Center;
+    let measured: f32 = if centred {
+        words
+            .iter()
+            .map(|word| {
+                let main = painter
+                    .layout_no_wrap(word.text.clone(), font.clone(), color)
+                    .size()
+                    .x;
+                let small = |text: &Option<String>, on: bool| {
+                    text.as_ref().filter(|_| on).map_or(0.0, |text| {
+                        painter
+                            .layout_no_wrap(text.clone(), reading_font.clone(), color)
+                            .size()
+                            .x
+                            + row * 0.5
+                    })
+                };
+                main.max(small(&word.reading, readings))
+                    .max(small(&word.gloss, glosses))
+                    + if word.space { space } else { 0.0 }
+            })
+            .sum()
+    } else {
+        0.0
+    };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
-        for word in words {
+        if centred && measured < ui.available_width() {
+            ui.add_space((ui.available_width() - measured) / 2.0);
+        }
+        for (number, word) in words.iter().enumerate() {
+            let color = fills
+                .as_ref()
+                .and_then(|fills| fills.get(number).copied())
+                .unwrap_or(color);
             let main = painter.layout_no_wrap(word.text.clone(), font.clone(), color);
             let small = |text: &Option<String>, on: bool, color: Color32| {
                 text.as_ref()
@@ -213,6 +359,28 @@ const KEYS_ASKED: &str = "lyrics-ai-keys-asked";
 pub(super) fn settings(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> bool {
     let locale = app.locale;
     let mut changed = false;
+    #[cfg(feature = "mods")]
+    widgets::setting_row(
+        ui,
+        palette,
+        &gettext(locale, "ivLyrics (web mod)"),
+        &gettext(
+            locale,
+            "The old ivLyrics page in a webview, beside the native lyrics page. Uses about a gigabyte of memory while open.",
+        ),
+        |ui| {
+            if widgets::switch(
+                ui,
+                palette,
+                &gettext(locale, "ivLyrics (web mod)"),
+                &mut app.settings.mods_enabled,
+            )
+            .changed()
+            {
+                changed = true;
+            }
+        },
+    );
     let available = crate::lyrics_video::available();
     let video_note = if available {
         gettext(
@@ -296,32 +464,7 @@ pub(super) fn settings(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> b
         },
     );
     widgets::setting_row(ui, palette, &gettext(locale, "Translate into"), "", |ui| {
-        let interface = gettext(locale, "Interface language");
-        let selected = crate::lyrics_ai::language(&ai.target_language).map_or_else(
-            || interface.to_string(),
-            |language| language.native.to_string(),
-        );
-        egui::ComboBox::from_id_salt("lyrics_ai_target")
-            .selected_text(selected)
-            .width(200.0_f32.min(ui.available_width()))
-            .height(1000.0)
-            .show_ui(ui, |ui| {
-                let choices = std::iter::once(("", interface.as_ref())).chain(
-                    LANGUAGES
-                        .iter()
-                        .map(|language| (language.tag, language.native)),
-                );
-                for (tag, label) in choices {
-                    if ui
-                        .selectable_label(ai.target_language == tag, label)
-                        .clicked()
-                        && ai.target_language != tag
-                    {
-                        ai.target_language = tag.to_string();
-                        changed = true;
-                    }
-                }
-            });
+        changed |= target_picker(app, ui);
     });
     widgets::setting_row(
         ui,
@@ -333,6 +476,50 @@ pub(super) fn settings(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> b
         ),
         |_| {},
     );
+    changed |= provider_and_key(app, ui, palette);
+    changed
+}
+
+/// The target language's dropdown. True when it changed.
+pub(super) fn target_picker(app: &mut App, ui: &mut egui::Ui) -> bool {
+    let locale = app.locale;
+    let ai = &mut app.settings.lyrics_ai;
+    let mut changed = false;
+    let interface = gettext(locale, "Interface language");
+    let selected = crate::lyrics_ai::language(&ai.target_language).map_or_else(
+        || interface.to_string(),
+        |language| language.native.to_string(),
+    );
+    egui::ComboBox::from_id_salt("lyrics_ai_target")
+        .selected_text(selected)
+        .width(200.0_f32.min(ui.available_width()))
+        .height(1000.0)
+        .show_ui(ui, |ui| {
+            let choices = std::iter::once(("", interface.as_ref())).chain(
+                LANGUAGES
+                    .iter()
+                    .map(|language| (language.tag, language.native)),
+            );
+            for (tag, label) in choices {
+                if ui
+                    .selectable_label(ai.target_language == tag, label)
+                    .clicked()
+                    && ai.target_language != tag
+                {
+                    ai.target_language = tag.to_string();
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// The provider, its model and endpoint, and the API key. True when a
+/// setting changed (a key is saved through an action).
+pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> bool {
+    let locale = app.locale;
+    let ai = &mut app.settings.lyrics_ai;
+    let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         for provider in Provider::ALL {

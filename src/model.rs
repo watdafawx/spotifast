@@ -1366,6 +1366,10 @@ pub enum Action {
     FollowLyrics,
     PauseLyricsFollow,
     RetryLyrics,
+    /// Fork: open or close the native lyrics page.
+    ToggleLyricsPage,
+    /// Fork: pick the playing song's video, or none, or the search's.
+    ChooseLyricsVideo(crate::lyrics_video::Choice),
     /// Fork: ask again for the lyrics' extra lines after a failure.
     RetryLyricsExtras,
     /// Fork: ask which AI keys are saved (src/lyrics_ai.rs).

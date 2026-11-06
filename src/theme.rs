@@ -522,6 +522,9 @@ fastframe_icons::icons! {
         Square => "square",
         SquarePen => lucide "square-pen",
         Sun => lucide "sun",
+        /// Fork: the lyrics page's appearance and follow controls.
+        Palette => "palette",
+        LocateFixed => "locate-fixed",
         Tablet => "tablet",
         Trash => lucide "trash-2",
         TrendingUp => "trending-up",

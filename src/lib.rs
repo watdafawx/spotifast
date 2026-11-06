@@ -29,6 +29,8 @@ pub mod local_tags;
 pub mod lyrics;
 /// Fork: AI pronunciation and translation under the lyrics.
 pub mod lyrics_ai;
+/// Fork: the lyrics page's settings and per-song lyrics offsets.
+pub mod lyrics_page;
 /// Fork: music videos behind full-screen lyrics.
 pub mod lyrics_video;
 #[cfg(target_os = "macos")]
@@ -73,4 +75,6 @@ pub mod util;
 pub mod vis;
 pub mod winamp;
 pub mod window;
+/// Fork: word timing from Unison for the word-by-word light.
+pub mod word_timing;
 pub mod zeroconf;

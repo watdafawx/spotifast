@@ -65,6 +65,7 @@ const RENDER_PARAM_API_TYPE: c_int = 1;
 const RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
 const RENDER_PARAM_OPENGL_FBO: c_int = 3;
 const RENDER_PARAM_FLIP_Y: c_int = 4;
+const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
 const FORMAT_DOUBLE: c_int = 5;
 const EVENT_NONE: c_int = 0;
 const EVENT_SHUTDOWN: c_int = 1;
@@ -88,6 +89,7 @@ struct Api {
     render_set_update_callback:
         unsafe extern "C" fn(RenderContext, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void),
     render_render: unsafe extern "C" fn(RenderContext, *mut RenderParam) -> c_int,
+    render_update: unsafe extern "C" fn(RenderContext) -> u64,
     render_free: unsafe extern "C" fn(RenderContext),
 }
 
@@ -142,6 +144,7 @@ fn api() -> Option<&'static Api> {
             render_create: load!("mpv_render_context_create"),
             render_set_update_callback: load!("mpv_render_context_set_update_callback"),
             render_render: load!("mpv_render_context_render"),
+            render_update: load!("mpv_render_context_update"),
             render_free: load!("mpv_render_context_free"),
         })
     })
@@ -184,7 +187,11 @@ unsafe extern "C" fn on_update(ctx: *mut c_void) {
     // SAFETY: `ctx` is the boxed context the player owns, freed only after
     // the render context, which stops these calls.
     let ctx = unsafe { &*(ctx as *const egui::Context) };
-    ctx.request_repaint();
+    // About 60 a second at most: mpv asks far more often than videos
+    // change, and each ask is a whole window's frame. egui takes one
+    // predicted 1/60 s frame off a delayed repaint (see
+    // theme::repaint_after), so 33 ms here lands near 16 ms.
+    ctx.request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 #[derive(Default)]
@@ -193,6 +200,10 @@ struct Status {
     loaded: Option<String>,
     /// mpv's last message, so a repeated one is logged once.
     last_message: String,
+    /// The blur radius mpv was last given; `None` before any.
+    blur: Option<f32>,
+    /// When the current video began loading, to log how long it took.
+    loading_since: Option<std::time::Instant>,
     time: Option<f64>,
     duration: Option<f64>,
     /// A frame of the loaded video is ready to show.
@@ -200,8 +211,88 @@ struct Status {
     paused: bool,
 }
 
+/// Whether the blur shader is on disk at `path`. The first call writes it
+/// on a thread of its own, never the UI thread, and answers false until
+/// that is done.
+fn shader_written(path: &std::path::Path) -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 not started, 1 writing, 2 written, 3 failed.
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Acquire) {
+        2 => true,
+        0 if STATE
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok() =>
+        {
+            let path = path.to_path_buf();
+            std::thread::spawn(move || {
+                let current = std::fs::read_to_string(&path).ok().as_deref() == Some(BLUR_SHADER);
+                let written = current || {
+                    if let Some(folder) = path.parent() {
+                        let _ = std::fs::create_dir_all(folder);
+                    }
+                    fastframe_file::write(&path, BLUR_SHADER.as_bytes())
+                        .inspect_err(|error| {
+                            log::debug!("lyrics video: cannot write the blur shader: {error}");
+                        })
+                        .is_ok()
+                };
+                STATE.store(if written { 2 } else { 3 }, Ordering::Release);
+            });
+            false
+        }
+        _ => false,
+    }
+}
+
+/// A Gaussian blur in two passes, across then down, at most 25 taps a
+/// pass whatever the radius.
+const BLUR_SHADER: &str = r#"//!PARAM radius
+//!DESC blur radius in video pixels
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 64.0
+12.0
+
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Spotifast blur across
+vec4 hook() {
+    if (radius < 0.5) return HOOKED_texOff(vec2(0.0));
+    float step_size = max(1.0, radius / 12.0);
+    float sigma = radius / 2.0;
+    vec4 sum = vec4(0.0);
+    float total = 0.0;
+    for (float x = -radius; x <= radius; x += step_size) {
+        float w = exp(-(x * x) / (2.0 * sigma * sigma));
+        sum += HOOKED_texOff(vec2(x, 0.0)) * w;
+        total += w;
+    }
+    return sum / total;
+}
+
+//!HOOK MAIN
+//!BIND HOOKED
+//!DESC Spotifast blur down
+vec4 hook() {
+    if (radius < 0.5) return HOOKED_texOff(vec2(0.0));
+    float step_size = max(1.0, radius / 12.0);
+    float sigma = radius / 2.0;
+    vec4 sum = vec4(0.0);
+    float total = 0.0;
+    for (float y = -radius; y <= radius; y += step_size) {
+        float w = exp(-(y * y) / (2.0 * sigma * sigma));
+        sum += HOOKED_texOff(vec2(0.0, y)) * w;
+        total += w;
+    }
+    return sum / total;
+}
+"#;
+
 struct Render {
     context: RenderContext,
+    /// The texture was just made and holds no frame yet.
+    fresh_texture: bool,
     framebuffer: Option<glow::NativeFramebuffer>,
     texture: Option<glow::NativeTexture>,
     size: (i32, i32),
@@ -243,6 +334,11 @@ impl Player {
             ("input-default-bindings", "no".into()),
             ("input-vo-keyboard", "no".into()),
             ("keep-open", "yes".into()),
+            ("hr-seek", "yes".into()),
+            // Frames are drawn when due, without mpv waiting for them in
+            // our paint (see RENDER_PARAM_BLOCK_FOR_TARGET_TIME); it then
+            // asks for one redraw per video frame, not one per display frame.
+            ("video-timing-offset", "0".into()),
             // No looping: a stream that fails would retry without end.
             // A video shorter than the song is started over by the sync.
             // Fill the view, cropping the sides rather than adding bars.
@@ -250,7 +346,7 @@ impl Player {
             ("ytdl", "yes".into()),
             (
                 "ytdl-format",
-                "bv*[height<=1080]/b[height<=1080]/bv*/b".into(),
+                "bv*[height<=?720]/b[height<=?720]/wv*/w".into(),
             ),
             ("demuxer-max-bytes", "64MiB".into()),
         ];
@@ -300,7 +396,9 @@ impl Player {
         unsafe { (self.api.command_async)(self.handle, 0, pointers.as_mut_ptr()) };
     }
 
-    /// Starts the YouTube video `id` at `start` seconds, paused or not.
+    /// Starts the YouTube video `id` at `start` seconds, paused or not, at
+    /// most 720p: a backdrop needs no more, and smaller streams start
+    /// sooner.
     pub fn load(&self, id: &str, start: f64, paused: bool) {
         {
             let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
@@ -310,6 +408,7 @@ impl Player {
             *status = Status {
                 loaded: Some(id.to_string()),
                 paused,
+                loading_since: Some(std::time::Instant::now()),
                 ..Status::default()
             };
         }
@@ -337,7 +436,8 @@ impl Player {
     }
 
     pub fn seek(&self, seconds: f64) {
-        self.command(&["seek", &format!("{seconds:.3}"), "absolute"]);
+        // Exact, not the nearest keyframe, which can be seconds away.
+        self.command(&["seek", &format!("{seconds:.3}"), "absolute+exact"]);
         let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
         status.time = Some(seconds);
     }
@@ -362,7 +462,15 @@ impl Player {
             let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
             match event.event_id {
                 EVENT_NONE | EVENT_SHUTDOWN => return,
-                EVENT_PLAYBACK_RESTART => status.ready = true,
+                EVENT_PLAYBACK_RESTART => {
+                    status.ready = true;
+                    if let Some(since) = status.loading_since.take() {
+                        log::info!(
+                            "lyrics video: first frame after {} ms",
+                            since.elapsed().as_millis()
+                        );
+                    }
+                }
                 EVENT_END_FILE => status.ready = false,
                 EVENT_LOG_MESSAGE if !event.data.is_null() => {
                     let message = unsafe { &*(event.data as *const EventLogMessage) };
@@ -400,6 +508,37 @@ impl Player {
                 _ => {}
             }
         }
+    }
+
+    /// Blurs the picture by `radius` video pixels with a two-pass Gaussian
+    /// shader mpv runs on the GPU; 0 takes the shader out. `folder` holds
+    /// the shader file.
+    pub fn set_blur(&self, folder: &std::path::Path, radius: f32) {
+        let radius = (radius.clamp(0.0, 64.0) * 2.0).round() / 2.0;
+        {
+            let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
+            if status.blur == Some(radius) {
+                return;
+            }
+            status.blur = Some(radius);
+        }
+        if radius < 0.5 {
+            self.command(&["change-list", "glsl-shaders", "clr", ""]);
+            return;
+        }
+        let path = folder.join("lyrics-blur.glsl");
+        if !shader_written(&path) {
+            // Not yet on disk: forget the radius so the next sync tries again.
+            self.status.lock().unwrap_or_else(|p| p.into_inner()).blur = None;
+            return;
+        }
+        self.command(&["set", "glsl-shader-opts", &format!("radius={radius}")]);
+        self.command(&[
+            "change-list",
+            "glsl-shaders",
+            "set",
+            &path.to_string_lossy(),
+        ]);
     }
 
     /// Video time, video length, and whether a frame is ready.
@@ -492,32 +631,47 @@ impl Player {
                 render.texture = Some(texture);
                 render.framebuffer = Some(framebuffer);
                 render.size = (w, h);
+                render.fresh_texture = true;
             }
             let Some(framebuffer) = render.framebuffer else {
                 return;
             };
-            let mut fbo = OpenGlFbo {
-                fbo: framebuffer.0.get() as c_int,
-                w,
-                h,
-                internal_format: 0,
-            };
-            let mut flip: c_int = 1;
-            let mut params = [
-                RenderParam {
-                    kind: RENDER_PARAM_OPENGL_FBO,
-                    data: (&mut fbo as *mut OpenGlFbo).cast(),
-                },
-                RenderParam {
-                    kind: RENDER_PARAM_FLIP_Y,
-                    data: (&mut flip as *mut c_int).cast(),
-                },
-                RenderParam {
-                    kind: RENDER_PARAM_INVALID,
-                    data: std::ptr::null_mut(),
-                },
-            ];
-            (self.api.render_render)(render.context, params.as_mut_ptr());
+            // A new frame from mpv, or a new texture to fill: draw. Else the
+            // last frame is still in the texture; only copy it again, so
+            // egui's repaints do not make mpv draw (and ask for more).
+            let fresh = std::mem::take(&mut render.fresh_texture);
+            let new_frame = (self.api.render_update)(render.context) & 1 != 0;
+            if fresh || new_frame {
+                let mut fbo = OpenGlFbo {
+                    fbo: framebuffer.0.get() as c_int,
+                    w,
+                    h,
+                    internal_format: 0,
+                };
+                let mut flip: c_int = 1;
+                // mpv would otherwise wait until the frame is due, holding up
+                // the whole window's frame: the lyrics stutter with the video.
+                let mut block: c_int = 0;
+                let mut params = [
+                    RenderParam {
+                        kind: RENDER_PARAM_OPENGL_FBO,
+                        data: (&mut fbo as *mut OpenGlFbo).cast(),
+                    },
+                    RenderParam {
+                        kind: RENDER_PARAM_FLIP_Y,
+                        data: (&mut flip as *mut c_int).cast(),
+                    },
+                    RenderParam {
+                        kind: RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                        data: (&mut block as *mut c_int).cast(),
+                    },
+                    RenderParam {
+                        kind: RENDER_PARAM_INVALID,
+                        data: std::ptr::null_mut(),
+                    },
+                ];
+                (self.api.render_render)(render.context, params.as_mut_ptr());
+            }
             // Copy the frame into the viewport of whatever egui draws to.
             let target = NonZeroU32::new(previous as u32).map(glow::NativeFramebuffer);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
@@ -570,6 +724,7 @@ impl Player {
         unsafe { (self.api.render_set_update_callback)(context, Some(on_update), repaint) };
         Some(Render {
             context,
+            fresh_texture: true,
             framebuffer: None,
             texture: None,
             size: (0, 0),

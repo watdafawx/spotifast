@@ -174,6 +174,91 @@ pub struct Request {
 struct Cached {
     version: u32,
     found: Option<VideoInfo>,
+    /// The listener picked this (a video, or none); kept for a year.
+    #[serde(default)]
+    chosen: bool,
+}
+
+/// A listener's picks are theirs to change, not the search's.
+const CHOSEN_LIFETIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+/// What the listener wants behind a song.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// This YouTube video.
+    Video(String),
+    /// Whatever the search finds.
+    Automatic,
+    /// The cover, no video.
+    Nothing,
+}
+
+/// The YouTube id in a pasted link (watch, youtu.be, shorts, embed) or a
+/// bare id.
+pub fn youtube_id(text: &str) -> Option<String> {
+    let text = text.trim();
+    let valid = |id: &str| {
+        id.len() == 11
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    if valid(text) {
+        return Some(text.to_string());
+    }
+    let candidate = if let Some((_, query)) = text.split_once('?')
+        && let Some(value) = query.split('&').find_map(|pair| pair.strip_prefix("v="))
+    {
+        value
+    } else {
+        ["youtu.be/", "/shorts/", "/embed/", "/live/"]
+            .iter()
+            .find_map(|marker| text.split_once(marker).map(|(_, rest)| rest))?
+            .split(['?', '&', '/', '#'])
+            .next()?
+    };
+    valid(candidate).then(|| candidate.to_string())
+}
+
+fn cache_path(cache_dir: &Path, uri: &str) -> Option<PathBuf> {
+    let id = uri
+        .strip_prefix("spotify:track:")
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))?;
+    Some(cache_dir.join(format!("{id}.json")))
+}
+
+/// Applies the listener's choice for a song and answers the video to show.
+/// Blocking: run it off the UI thread.
+pub fn choose(
+    cache_dir: &Path,
+    request: &Request,
+    choice: &Choice,
+) -> Result<Option<VideoInfo>, String> {
+    let Some(path) = cache_path(cache_dir, &request.uri) else {
+        return Ok(None);
+    };
+    match choice {
+        Choice::Automatic => {
+            let _ = std::fs::remove_file(&path);
+            find(cache_dir, request)
+        }
+        Choice::Nothing => {
+            write_cache_as(&path, &None, true);
+            Ok(None)
+        }
+        Choice::Video(id) => {
+            let mut info = VideoInfo {
+                youtube_id: id.clone(),
+                caption_start: None,
+                automatic: true,
+                skip: Vec::new(),
+            };
+            sync_from_captions(cache_dir, &mut info, request);
+            let found = Some(info);
+            write_cache_as(&path, &found, true);
+            Ok(found)
+        }
+    }
 }
 
 pub fn cache_dir(lyrics_cache: &Path) -> PathBuf {
@@ -183,14 +268,9 @@ pub fn cache_dir(lyrics_cache: &Path) -> PathBuf {
 /// The song's music video, from the cache while it is fresh, else from a
 /// YouTube search through yt-dlp. Blocking: run it off the UI thread.
 pub fn find(cache_dir: &Path, request: &Request) -> Result<Option<VideoInfo>, String> {
-    let Some(id) = request
-        .uri
-        .strip_prefix("spotify:track:")
-        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
-    else {
+    let Some(path) = cache_path(cache_dir, &request.uri) else {
         return Ok(None);
     };
-    let path = cache_dir.join(format!("{id}.json"));
     if let Some(cached) = read_cache(&path) {
         log::debug!("lyrics video for {}: from the cache", request.uri);
         return Ok(cached);
@@ -452,7 +532,9 @@ fn read_cache(path: &Path) -> Option<Option<VideoInfo>> {
     if cached.version != CACHE_VERSION {
         return None;
     }
-    let lifetime = if cached.found.is_some() {
+    let lifetime = if cached.chosen {
+        CHOSEN_LIFETIME
+    } else if cached.found.is_some() {
         FOUND_LIFETIME
     } else {
         MISSING_LIFETIME
@@ -461,9 +543,14 @@ fn read_cache(path: &Path) -> Option<Option<VideoInfo>> {
 }
 
 fn write_cache(path: &Path, found: &Option<VideoInfo>) {
+    write_cache_as(path, found, false);
+}
+
+fn write_cache_as(path: &Path, found: &Option<VideoInfo>, chosen: bool) {
     let Ok(bytes) = serde_json::to_vec(&Cached {
         version: CACHE_VERSION,
         found: found.clone(),
+        chosen,
     }) else {
         return;
     };
@@ -496,6 +583,12 @@ pub struct State {
     pub last_seek: Option<std::time::Instant>,
     /// mpv could not start; not tried again this run.
     pub failed: bool,
+    /// Frames drawn while lyrics were on screen, and since when, for the
+    /// frame rate in the debug log.
+    pub frames: (u32, Option<std::time::Instant>),
+    /// The last frame's time and the longest gap between frames since the
+    /// last report.
+    pub frame_gap: (Option<std::time::Instant>, Duration),
 }
 
 /// Whether video backgrounds can work here: Windows with libmpv.
@@ -513,16 +606,32 @@ pub fn available() -> bool {
 /// How often the video is brought in line with the song.
 const SYNC_EVERY: Duration = Duration::from_millis(250);
 /// Drift this large is corrected with a seek.
-const SEEK_THRESHOLD: f64 = 0.5;
+const SEEK_THRESHOLD: f64 = 0.3;
 /// After a seek, the stream gets this long to land before another.
 const SEEK_SETTLE: Duration = Duration::from_secs(3);
-/// The video stops this long after full screen closes; the player stays,
-/// idle, for the next time.
-const LINGER: Duration = Duration::from_secs(30);
+/// For this long after the lyrics page or full screen was last open, each
+/// new song's video is found and loaded paused in the background, so it is
+/// there the moment the lyrics are opened again. After that the player
+/// stops and stays idle.
+const LINGER: Duration = Duration::from_secs(10 * 60);
 
 /// Once a frame: finds the playing song's video while full-screen lyrics
 /// are open, and keeps mpv playing it in time with the song.
 pub fn sync(app: &mut crate::app::App, ctx: &egui::Context) {
+    // Fork page: scrolling by hand pauses following; it resumes this long
+    // after the scrolling stops.
+    const RESUME_AFTER: Duration = Duration::from_millis(250);
+    if !app.lyrics_following
+        && app.settings.lyrics_page.follow
+        && let Some(paused) = app.lyrics_paused_at
+    {
+        if paused.elapsed() >= RESUME_AFTER {
+            app.lyrics_paused_at = None;
+            app.actions.push(crate::model::Action::FollowLyrics);
+        } else {
+            ctx.request_repaint_after(RESUME_AFTER);
+        }
+    }
     #[cfg(windows)]
     sync_windows(app, ctx);
     #[cfg(not(windows))]
@@ -532,30 +641,58 @@ pub fn sync(app: &mut crate::app::App, ctx: &egui::Context) {
 #[cfg(windows)]
 fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
     use std::time::Instant;
-    let showing = app.lyrics_fullscreen.is_some() && app.settings.lyrics_video && available();
+    let showing = (app.lyrics_fullscreen.is_some() || app.lyrics_page_open)
+        && app.settings.lyrics_video
+        && available();
+    let blur = app.settings.lyrics_page.blur;
+    let shader_folder = app.dirs.cache.clone();
     let now_playing = app.now_playing().filter(|now| !now.is_episode);
+    if showing {
+        app.lyrics_video.last_shown = Some(Instant::now());
+        let now_frame = Instant::now();
+        let (last, worst) = &mut app.lyrics_video.frame_gap;
+        if let Some(last) = last.replace(now_frame) {
+            *worst = (*worst).max(now_frame - last);
+        }
+        let worst = *worst;
+        let (frames, since) = &mut app.lyrics_video.frames;
+        *frames += 1;
+        let started = *since.get_or_insert_with(Instant::now);
+        if started.elapsed() >= Duration::from_secs(5) {
+            log::debug!(
+                "lyrics view: {:.0} frames a second, slowest {} ms",
+                f64::from(*frames) / started.elapsed().as_secs_f64(),
+                worst.as_millis()
+            );
+            app.lyrics_video.frames = (0, Some(Instant::now()));
+            app.lyrics_video.frame_gap.1 = Duration::ZERO;
+        }
+    }
+    // Shown now, or lately: keep the playing song's video ready.
+    let ready_ahead = app.settings.lyrics_video
+        && available()
+        && app
+            .lyrics_video
+            .last_shown
+            .is_some_and(|at| at.elapsed() < LINGER);
     let state = &mut app.lyrics_video;
-    let (Some(now), true) = (now_playing, showing) else {
+    let (Some(now), true) = (now_playing, ready_ahead) else {
         if let Some(player) = &state.player
             && player.loaded().is_some()
-            && state.last_shown.is_none_or(|at| at.elapsed() > LINGER)
         {
             player.stop();
         }
         return;
     };
-    state.last_shown = Some(Instant::now());
     if state.uri.as_deref() != Some(now.uri.as_str()) {
+        // Lyrics may not be asked for yet while nothing shows them.
+        // (A lyrics view on screen asks for them itself.)
+        if !showing && app.lyrics_uri.as_deref() != Some(now.uri.as_str()) {
+            app.request_lyrics();
+        }
         // The captions are lined up with the lyrics, so wait for them.
-        let lyrics = match &app.lyrics {
-            _ if app.lyrics_uri.as_deref() != Some(now.uri.as_str()) => return,
-            crate::model::Loadable::NotLoaded | crate::model::Loadable::Loading => return,
-            crate::model::Loadable::Loaded(Some(lyrics)) if lyrics.synced => lyrics
-                .lines
-                .iter()
-                .filter_map(|line| Some((line.at_ms?, line.text.clone())))
-                .collect(),
-            _ => Vec::new(),
+        let Some(request) = request_for(app) else {
+            return;
         };
         let state = &mut app.lyrics_video;
         state.uri = Some(now.uri.clone());
@@ -564,20 +701,7 @@ fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
             player.stop();
         }
         app.backend
-            .send(crate::backend::Command::FindLyricsVideo(Box::new(
-                Request {
-                    uri: now.uri.clone(),
-                    title: now.title.clone(),
-                    artists: now
-                        .artists
-                        .iter()
-                        .map(|artist| artist.name.clone())
-                        .collect(),
-                    album: now.album_name.clone(),
-                    duration_ms: now.duration_ms,
-                    lyrics,
-                },
-            )));
+            .send(crate::backend::Command::FindLyricsVideo(Box::new(request)));
         return;
     }
     let state = &mut app.lyrics_video;
@@ -597,6 +721,7 @@ fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
         return;
     };
     player.poll();
+    player.set_blur(&shader_folder, blur);
     if state.last_sync.is_some_and(|at| at.elapsed() < SYNC_EVERY) {
         ctx.request_repaint_after(SYNC_EVERY);
         return;
@@ -627,7 +752,8 @@ fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
             false,
         ),
     };
-    let paused = hold || !now.playing;
+    // Out of sight the video waits, loaded and paused, at the song's place.
+    let paused = hold || !now.playing || !showing;
     if !player.can_draw() {
         // The next frame's paint callback sets mpv's drawing up.
         ctx.request_repaint();
@@ -640,9 +766,61 @@ fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
     }
     player.set_paused(paused);
     let settled = state.last_seek.is_none_or(|at| at.elapsed() > SEEK_SETTLE);
-    if settled && time.is_none_or(|time| (time - wanted).abs() > SEEK_THRESHOLD) {
+    // Out of sight it is not chased; it catches up once when shown.
+    if showing && settled && time.is_none_or(|time| (time - wanted).abs() > SEEK_THRESHOLD) {
         player.seek(wanted);
         state.last_seek = Some(Instant::now());
+    }
+}
+
+/// What a lookup for the playing song needs, once its lyrics are settled
+/// (the captions are lined up with them); `None` while they load.
+pub fn request_for(app: &crate::app::App) -> Option<Request> {
+    let now = app.now_playing().filter(|now| !now.is_episode)?;
+    let lyrics = match &app.lyrics {
+        _ if app.lyrics_uri.as_deref() != Some(now.uri.as_str()) => return None,
+        crate::model::Loadable::NotLoaded | crate::model::Loadable::Loading => return None,
+        crate::model::Loadable::Loaded(Some(lyrics)) if lyrics.synced => lyrics
+            .lines
+            .iter()
+            .filter_map(|line| Some((line.at_ms?, line.text.clone())))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(Request {
+        uri: now.uri.clone(),
+        title: now.title.clone(),
+        artists: now
+            .artists
+            .iter()
+            .map(|artist| artist.name.clone())
+            .collect(),
+        album: now.album_name.clone(),
+        duration_ms: now.duration_ms,
+        lyrics,
+    })
+}
+
+/// Whether a video is on its way for the playing song: being found, or
+/// found and not yet showing a frame. The lyrics page shows a spinner.
+pub fn loading(app: &crate::app::App) -> bool {
+    if !app.settings.lyrics_video || !available() {
+        return false;
+    }
+    let state = &app.lyrics_video;
+    let playing = app.now_playing().map(|now| now.uri);
+    if playing.is_none() || playing != state.uri {
+        return playing.is_some();
+    }
+    match &state.info {
+        None => true,
+        Some(None) => false,
+        #[cfg(windows)]
+        Some(Some(info)) => !state.player.as_ref().is_some_and(|player| {
+            player.loaded().as_deref() == Some(info.youtube_id.as_str()) && player.position().2
+        }),
+        #[cfg(not(windows))]
+        Some(Some(_)) => false,
     }
 }
 
@@ -701,6 +879,43 @@ mod tests {
             automatic,
             skip,
         }
+    }
+
+    #[test]
+    fn pasted_links_give_their_youtube_id() {
+        let id = Some("Mmw-PpWhKFg".to_string());
+        assert_eq!(
+            youtube_id("https://www.youtube.com/watch?v=Mmw-PpWhKFg&t=30s"),
+            id
+        );
+        assert_eq!(youtube_id("https://youtu.be/Mmw-PpWhKFg?si=abc"), id);
+        assert_eq!(youtube_id("https://www.youtube.com/shorts/Mmw-PpWhKFg"), id);
+        assert_eq!(youtube_id(" Mmw-PpWhKFg "), id);
+        assert_eq!(youtube_id("https://example.com/watch?v=short"), None);
+        assert_eq!(youtube_id("not a link"), None);
+    }
+
+    #[test]
+    fn a_chosen_video_or_none_outlasts_the_search() {
+        let dir = std::env::temp_dir().join(format!("spotifast-choose-{}", std::process::id()));
+        let request = Request {
+            uri: "spotify:track:abc".into(),
+            title: String::new(),
+            artists: Vec::new(),
+            album: String::new(),
+            duration_ms: 0,
+            lyrics: Vec::new(),
+        };
+        let chosen = choose(&dir, &request, &Choice::Video("Mmw-PpWhKFg".into())).unwrap();
+        assert_eq!(chosen.unwrap().youtube_id, "Mmw-PpWhKFg");
+        let path = cache_path(&dir, &request.uri).unwrap();
+        assert_eq!(
+            read_cache(&path).flatten().unwrap().youtube_id,
+            "Mmw-PpWhKFg"
+        );
+        assert_eq!(choose(&dir, &request, &Choice::Nothing).unwrap(), None);
+        assert_eq!(read_cache(&path), Some(None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -14,6 +14,10 @@ pub mod login;
 mod lyrics;
 /// Fork: pronunciation and translation under the lyrics.
 mod lyrics_ai;
+/// Fork: the lyrics page's optional animations and effects.
+mod lyrics_fx;
+/// Fork: the lyrics page that takes over the main area.
+mod lyrics_page;
 pub mod new_releases;
 pub mod player_bar;
 mod prerelease;
@@ -340,6 +344,11 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             // page casts a shadow under the header instead.
             ui.spacing_mut().scroll.fade.strength = 0.0;
             topbar::show(app, ui);
+            // Fork: the native lyrics page takes the main area, as ivLyrics'.
+            if app.lyrics_page_open {
+                lyrics_page::show(app, ui);
+                return;
+            }
             // Fork: the mod's page (its own player-bar button), as in Spotify.
             #[cfg(feature = "mods")]
             if crate::mods::page_open() && crate::mods::place(ui) {

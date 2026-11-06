@@ -20,8 +20,13 @@ const SUNG_LINE_GROWTH: f32 = 1.15;
 
 /// Scrolls so the middle of `line` sits `SUNG_LINE_AT` of the way down the
 /// visible lyrics.
-fn show_sung_line(ui: &egui::Ui, line: Rect, animation: Option<egui::style::ScrollAnimation>) {
-    let above = (ui.clip_rect().height() * SUNG_LINE_AT - line.height() / 2.0).max(0.0);
+fn show_sung_line(
+    ui: &egui::Ui,
+    line: Rect,
+    animation: Option<egui::style::ScrollAnimation>,
+    at: f32,
+) {
+    let above = (ui.clip_rect().height() * at - line.height() / 2.0).max(0.0);
     let target = Rect::from_min_max(pos2(line.left(), line.top() - above), line.max);
     match animation {
         Some(animation) => ui.scroll_to_rect_animation(target, Some(Align::Min), animation),
@@ -31,7 +36,7 @@ fn show_sung_line(ui: &egui::Ui, line: Rect, animation: Option<egui::style::Scro
 /// How long a line takes to light up or fade.
 const LIGHT_UP_SECONDS: f32 = 0.22;
 
-fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
+pub(super) fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     egui::Color32::from(egui::Rgba::from(from) * (1.0 - t) + egui::Rgba::from(to) * t)
 }
@@ -206,7 +211,8 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
         Loadable::Loaded(Some(lyrics)) => lyrics.clone(),
     };
 
-    let active = lyrics.active_line(now.position_ms);
+    // Fork: the song's own lyrics offset (src/lyrics_page.rs).
+    let active = lyrics.active_line(app.settings.lyrics_page.position(&now.uri, now.position_ms));
     let follow = app.lyrics_following && app.lyrics_line_shown != Some(active);
     // The line being sung is bold and in the accent colour; every other
     // line is quiet, regular text, the same before and after it has been
@@ -265,6 +271,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     13.0,
                     color,
                     sense,
+                    None,
                 );
                 let response = if let Some(response) = ruby {
                     response
@@ -297,7 +304,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     app.lyrics_following = true;
                 }
                 if is_active && follow {
-                    show_sung_line(ui, rect, None);
+                    show_sung_line(ui, rect, None, SUNG_LINE_AT);
                 }
                 ui.add_space(LINE_GAP);
             }
@@ -374,7 +381,7 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
             content.add_space(20.0);
             track_heading(app, &mut content);
             content.add_space(16.0);
-            fullscreen_contents(app, &mut content);
+            fullscreen_contents(app, &mut content, crate::lyrics_page::Look::FULLSCREEN);
         });
 }
 
@@ -446,7 +453,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
                 pos2(lyrics_x + lyrics_width, below.bottom()),
             );
             let mut content = ui.new_child(UiBuilder::new().max_rect(lyrics));
-            fullscreen_contents(app, &mut content);
+            fullscreen_contents(app, &mut content, crate::lyrics_page::Look::FULLSCREEN);
         } else {
             // The cover and the lyrics are one group, centred in the window.
             let side = (below.width() * 0.38)
@@ -464,7 +471,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
                 pos2(column.right() + gap + lyrics_width, below.bottom()),
             );
             let mut content = ui.new_child(UiBuilder::new().max_rect(lyrics));
-            fullscreen_contents(app, &mut content);
+            fullscreen_contents(app, &mut content, crate::lyrics_page::Look::FULLSCREEN);
         }
     } else {
         let span = Rect::from_min_max(
@@ -710,12 +717,9 @@ fn cover_opens_immersive(app: &mut App, ui: &egui::Ui, cover: Rect, art: bool) {
     let _ = (app, ui, cover, art);
 }
 
-fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
-    theme::apply_local(ui, &theme::Palette::dark());
-    #[cfg(feature = "milkdrop")]
-    if milkdrop_backdrop(app, ui, rect) {
-        return;
-    }
+/// Fork: the video, or the song's softened cover, filling `rect`; true
+/// when it was the video.
+pub(super) fn backdrop(app: &mut App, ui: &egui::Ui, rect: Rect) -> bool {
     let art = app
         .now_playing()
         .and_then(|now| preferred_backdrop_art(now.art_small, now.art_url));
@@ -735,6 +739,17 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
             Color32::from_gray(180),
         );
     }
+    video
+}
+
+fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
+    theme::apply_local(ui, &theme::Palette::dark());
+    #[cfg(feature = "milkdrop")]
+    if milkdrop_backdrop(app, ui, rect) {
+        return;
+    }
+    let video = backdrop(app, ui, rect);
+    let painter = ui.painter().with_clip_rect(rect);
     // A moving video is busier than a blurred cover; darken it more so the
     // words stay readable.
     painter.rect_filled(
@@ -837,7 +852,14 @@ fn track_heading(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
+/// Fork: the lyrics page shows the full-screen lyrics at `scale`, its
+/// lines centred or not.
+pub(super) fn page_contents(app: &mut App, ui: &mut egui::Ui, look: crate::lyrics_page::Look) {
+    fullscreen_contents(app, ui, look);
+}
+
+fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui, look: crate::lyrics_page::Look) {
+    let centred = look.centred;
     let palette = theme::Palette::dark();
     let Some(now) = app.now_playing() else {
         widgets::empty_state(
@@ -893,7 +915,10 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
         Loadable::Loaded(Some(lyrics)) => lyrics.clone(),
     };
 
-    let active = lyrics.active_line(now.position_ms);
+    // Fork: the song's own lyrics offset (src/lyrics_page.rs).
+    let offset = app.settings.lyrics_page.offset(&now.uri);
+    let position = app.settings.lyrics_page.position(&now.uri, now.position_ms);
+    let active = lyrics.active_line(position);
     // A Follow click resets the remembered line after drawing. Other frames
     // record the shown line before any line-click action restores following.
     if !app
@@ -909,22 +934,65 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
             input.smooth_scroll_delta.y != 0.0
                 || (input.pointer.primary_down() && input.pointer.delta().y != 0.0)
         });
-    let following = app.lyrics_following && !manual_scroll;
+    let following = look.follow && app.lyrics_following && !manual_scroll;
     let follow = following && app.lyrics_line_shown != Some(active);
     let animation = crate::motion::scroll(ui.ctx(), 0.45);
-    let size = (ui.available_width() * 0.046).clamp(28.0, 42.0);
-    // The line being sung takes the theme's accent, though the view is
-    // always dark, and grows; each line wraps
-    // for its full size all along, so growing can't rewrap its words.
-    // A line takes 300 ms to light up or fade.
-    // A moving picture asks more of the quiet lines than a still one.
+    let size = (ui.available_width() * 0.046).clamp(28.0, 42.0) * look.scale;
+    // The line being sung takes the theme's accent (or, on the lyrics page,
+    // the style's colour), though the view is always dark, and grows; each
+    // line wraps for its full size all along, so growing can't rewrap its
+    // words. A line takes 300 ms to light up or fade.
+    // Fork page: Accent takes the cover's colour, lifted to read on a dark
+    // backdrop; a theme's own accent can be near white.
+    let bright = if look.style == crate::lyrics_page::LineStyle::Accent {
+        let art = now.art_small.clone().or_else(|| now.art_url.clone());
+        app.tint_for(art.as_deref())
+            .map_or(app.palette.accent, |tint| blend(tint, Color32::WHITE, 0.3))
+    } else {
+        app.palette.accent
+    };
+    let starts: Vec<Option<u32>> = lyrics.lines.iter().map(|line| line.at_ms).collect();
+    // Real word times, when Unison has the song timed word by word.
+    app.match_word_timing();
+    let timings = if app.word_timing.uri.as_deref() == Some(now.uri.as_str()) {
+        app.word_timing.matched.clone()
+    } else {
+        Vec::new()
+    };
+    let fill_for = |index: usize, quiet: Color32| {
+        (look.word_highlight && lyrics.synced && active == Some(index)).then(|| {
+            super::lyrics_ai::WordFill {
+                progress: crate::lyrics_page::line_progress(&starts, index, position),
+                sung: bright,
+                unsung: quiet,
+                times: timings.get(index).cloned().flatten(),
+                position,
+            }
+        })
+    };
+    if look.motion != crate::lyrics_page::Motion::None && now.playing {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
+    }
+    if look.word_highlight && now.playing {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    // A moving picture asks more of the quiet lines than a still one; the
+    // lyrics page sets its own (Other lines).
     let quiet = palette
         .text
         .gamma_multiply(if app.milkdrop_behind_lyrics() {
-            0.62
+            look.others.max(0.62)
         } else {
-            0.42
+            look.others
         });
+    if look.single_line && lyrics.synced {
+        single_line(
+            app, ui, &lyrics, active, size, look, bright, quiet, &fill_for,
+        );
+        return;
+    }
     ui.spacing_mut().scroll.fade.strength = 0.0;
     egui::ScrollArea::vertical()
         .id_salt(("fullscreen-lyrics-scroll", &now.uri))
@@ -944,8 +1012,8 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
             // the last to rise to it.
             let (padding, below) = if lyrics.synced {
                 (
-                    (viewport.height() * SUNG_LINE_AT - size).max(12.0),
-                    viewport.height() * (1.0 - SUNG_LINE_AT),
+                    (viewport.height() * look.sung_at - size).max(12.0),
+                    viewport.height() * (1.0 - look.sung_at),
                 )
             } else {
                 (12.0, 60.0)
@@ -960,11 +1028,20 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     is_active,
                     crate::motion::seconds(ui.ctx(), 0.3),
                 );
+                // Fade: lines quieten the further they are from the sung one.
+                let quiet = match (look.style, active) {
+                    (crate::lyrics_page::LineStyle::Fade, Some(sung)) => {
+                        let distance = sung.abs_diff(index) as f32;
+                        quiet.gamma_multiply((1.0 - distance * 0.3).max(0.08))
+                    }
+                    _ => quiet,
+                };
                 let color = if lyrics.synced {
-                    blend(quiet, app.palette.accent, lit)
+                    blend(quiet, bright, lit)
                 } else {
                     palette.text
                 };
+                let fill = fill_for(index, quiet);
                 let grown = if lyrics.synced {
                     1.0 + (SUNG_LINE_GROWTH - 1.0) * lit
                 } else {
@@ -981,43 +1058,113 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 // Untimed words have nowhere to jump to, but a click on them
                 // is still on a line, so it must not reach the backdrop.
                 let sense = Sense::click();
-                let galley = crate::bidi::layout(
-                    ui.painter(),
-                    text,
-                    font.clone(),
-                    color,
-                    wrap,
-                    usize::MAX,
-                    None,
-                );
+                // Fork page: an instrumental break as dots.
+                let dots = look.break_dots && lyrics.synced && line.text.is_empty();
+                let galley = match fill.clone().filter(|_| !crate::bidi::is_rtl(text)) {
+                    Some(fill) => super::lyrics_ai::filled_galley(
+                        ui.painter(),
+                        text,
+                        font.clone(),
+                        wrap,
+                        fill,
+                    ),
+                    None => crate::bidi::layout(
+                        ui.painter(),
+                        text,
+                        font.clone(),
+                        color,
+                        wrap,
+                        usize::MAX,
+                        None,
+                    ),
+                };
                 let center = ui.cursor().top() + galley.size().y * 0.5;
                 let edge = ((center - viewport.top()).min(viewport.bottom() - center)
                     / (size * 2.0))
                     .clamp(0.0, 1.0);
+                let time = ui.input(|input| input.time);
+                let (float, pulse) = if is_active {
+                    super::lyrics_fx::moving(look.motion, time, size)
+                } else {
+                    (0.0, 1.0)
+                };
                 let (response, extra) = ui
                     .scope(|ui| {
-                        ui.multiply_opacity(edge * edge * (3.0 - 2.0 * edge));
-                        // Fork: with its pronunciation above, word by word.
-                        let response = super::lyrics_ai::lyric_line(
-                            app,
-                            ui,
-                            index,
-                            text,
-                            font.clone(),
-                            (size * 0.5).max(15.0),
-                            color,
-                            sense,
-                        )
-                        .unwrap_or_else(|| ui.add(egui::Label::new(galley).sense(sense)));
-                        // Fork: pronunciation and translation under the line.
-                        let extra = super::lyrics_ai::under_line(
-                            app,
-                            ui,
-                            index,
-                            (size * 0.5).max(15.0),
-                            color,
-                        );
-                        (response, extra)
+                        ui.multiply_opacity(edge * edge * (3.0 - 2.0 * edge) * pulse);
+                        let draw = |ui: &mut egui::Ui| {
+                            if dots {
+                                let progress =
+                                    crate::lyrics_page::line_progress(&starts, index, position);
+                                let response = super::lyrics_fx::break_dots(
+                                    ui, size, color, progress, is_active, time,
+                                );
+                                return (response, None);
+                            }
+                            // Fork page: the translation as the line, the
+                            // original small above it.
+                            if look.translation_first
+                                && let Some(drawn) = translation_first(
+                                    app,
+                                    ui,
+                                    index,
+                                    text,
+                                    size,
+                                    color,
+                                    sense,
+                                    fill.clone(),
+                                )
+                            {
+                                return drawn;
+                            }
+                            // Fork: with its pronunciation above, word by word.
+                            let response = super::lyrics_ai::lyric_line(
+                                app,
+                                ui,
+                                index,
+                                text,
+                                font.clone(),
+                                (size * 0.5).max(15.0),
+                                color,
+                                sense,
+                                fill.clone(),
+                            )
+                            .unwrap_or_else(|| {
+                                // Fork page: glow and outline behind the words.
+                                let slot = ui.painter().add(egui::Shape::Noop);
+                                let response =
+                                    ui.add(egui::Label::new(galley.clone()).sense(sense));
+                                if look.glow || look.outline {
+                                    super::lyrics_fx::halo(
+                                        ui.painter(),
+                                        slot,
+                                        &galley,
+                                        response.rect.min,
+                                        (look.glow && is_active).then_some(bright),
+                                        look.outline,
+                                    );
+                                }
+                                response
+                            });
+                            // Fork: pronunciation and translation under the line.
+                            let extra = super::lyrics_ai::under_line(
+                                app,
+                                ui,
+                                index,
+                                (size * 0.5).max(15.0),
+                                color,
+                            );
+                            (response, extra)
+                        };
+                        let transform =
+                            egui::emath::TSTransform::from_translation(egui::vec2(0.0, float));
+                        ui.with_visual_transform(transform, |ui| {
+                            if centred {
+                                ui.vertical_centered(draw).inner
+                            } else {
+                                draw(ui)
+                            }
+                        })
+                        .inner
                     })
                     .inner;
                 let rect = extra.map_or(response.rect, |extra| response.rect.union(extra));
@@ -1025,13 +1172,16 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     && response.clicked()
                     && let Some(at_ms) = line.at_ms
                 {
+                    let at_ms = u32::try_from((i64::from(at_ms) - i64::from(offset)).max(0))
+                        .unwrap_or(at_ms);
                     app.actions.push(Action::Seek(at_ms));
                     app.actions.push(Action::FollowLyrics);
                 }
                 if is_active && follow {
-                    show_sung_line(ui, rect, Some(animation));
+                    show_sung_line(ui, rect, Some(animation), look.sung_at);
                 }
-                ui.add_space(27.0);
+                // Fork page: translated lines are groups; give them room.
+                ui.add_space(if look.translation_first { 40.0 } else { 27.0 });
             }
             // Words without timing can only be followed by the clock: sit
             // at the part of the text the song is probably at.
@@ -1062,13 +1212,245 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
             .lines
             .iter()
             .filter_map(|line| line.at_ms)
-            .find(|at| *at > now.position_ms)
+            .find(|at| *at > position)
     {
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(u64::from(
-                next - now.position_ms,
-            )));
+            .request_repaint_after(std::time::Duration::from_millis(u64::from(next - position)));
     }
+}
+
+/// Fork page: a translated line with the translation in the lyrics' own
+/// font and size, the original (with its readings and meanings) smaller
+/// above. `None` for a line without a translation, drawn as usual.
+#[allow(clippy::too_many_arguments)]
+fn translation_first(
+    app: &App,
+    ui: &mut egui::Ui,
+    index: usize,
+    text: &str,
+    size: f32,
+    color: Color32,
+    sense: Sense,
+    fill: Option<super::lyrics_ai::WordFill>,
+) -> Option<(egui::Response, Option<Rect>)> {
+    let (_, translation) =
+        app.lyrics_ai
+            .line(app.lyrics_uri.as_deref(), index, &app.settings.lyrics_ai);
+    let translation = translation?.to_string();
+    let small = theme::bold((size * 0.55).max(16.0));
+    let original = super::lyrics_ai::lyric_line(
+        app,
+        ui,
+        index,
+        text,
+        small.clone(),
+        (size * 0.38).max(12.0),
+        color.gamma_multiply(0.8),
+        sense,
+        fill.clone(),
+    )
+    .unwrap_or_else(|| {
+        let galley = match fill.filter(|_| !crate::bidi::is_rtl(text)) {
+            Some(fill) => super::lyrics_ai::filled_galley(
+                ui.painter(),
+                text,
+                small.clone(),
+                ui.available_width(),
+                fill,
+            ),
+            None => crate::bidi::layout(
+                ui.painter(),
+                text,
+                small.clone(),
+                color.gamma_multiply(0.8),
+                ui.available_width(),
+                usize::MAX,
+                None,
+            ),
+        };
+        ui.add(egui::Label::new(galley).sense(sense))
+    });
+    ui.add_space(4.0);
+    let galley = crate::bidi::layout(
+        ui.painter(),
+        &translation,
+        theme::bold(size),
+        color,
+        ui.available_width(),
+        usize::MAX,
+        None,
+    );
+    let main = ui.add(egui::Label::new(galley).sense(sense));
+    Some((original.union(main.clone()), Some(main.rect)))
+}
+
+/// Fork page: only the sung line shows, in the middle; the one before
+/// leaves and the sung one enters, as the page's look says.
+#[allow(clippy::too_many_arguments)]
+fn single_line(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    lyrics: &crate::lyrics::Lyrics,
+    active: Option<usize>,
+    size: f32,
+    look: crate::lyrics_page::Look,
+    bright: Color32,
+    quiet: Color32,
+    fill_for: &dyn Fn(usize, Color32) -> Option<super::lyrics_ai::WordFill>,
+) {
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, Sense::hover());
+    let uri = app.lyrics_uri.clone().unwrap_or_default();
+    let shown = active.unwrap_or(0);
+    let time = ui.input(|input| input.time);
+    let lines = shown.saturating_sub(1)..=(shown + 1).min(lyrics.lines.len().saturating_sub(1));
+    for index in lines {
+        let Some(line) = lyrics.lines.get(index) else {
+            continue;
+        };
+        let current = index == shown;
+        let t = ui.ctx().animate_bool_with_time(
+            egui::Id::new("single-lyric-line").with((&uri, index)),
+            current,
+            crate::motion::seconds(ui.ctx(), 0.45),
+        );
+        if t <= 0.01 {
+            continue;
+        }
+        let phase = if current {
+            super::lyrics_fx::entering(look.enter, t)
+        } else {
+            super::lyrics_fx::leaving(look.leave, t)
+        };
+        let height_id = egui::Id::new("single-lyric-height").with((&uri, index));
+        let height = ui
+            .data(|data| data.get_temp::<f32>(height_id))
+            .unwrap_or(size * 1.6);
+        let top = rect.center().y - height / 2.0;
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    pos2(rect.left(), top),
+                    pos2(rect.right(), top + height + size * 6.0),
+                ))
+                .layout(Layout::top_down(if look.centred {
+                    Align::Center
+                } else {
+                    Align::Min
+                })),
+        );
+        child.set_clip_rect(rect);
+        let (float, pulse) = if current && active.is_some() {
+            super::lyrics_fx::moving(look.motion, time, size)
+        } else {
+            (0.0, 1.0)
+        };
+        child.multiply_opacity(phase.opacity * pulse);
+        let centre = pos2(rect.center().x, top + height / 2.0);
+        let transform =
+            super::lyrics_fx::transform(centre, phase.shift * size * 1.6 + float, phase.scale);
+        let color = if current && active.is_some() {
+            bright
+        } else {
+            quiet
+        };
+        let fill = fill_for(index, quiet);
+        child.with_visual_transform(transform, |ui| {
+            let font = theme::bold(size * 1.15);
+            if line.text.is_empty() && look.break_dots {
+                let progress =
+                    crate::lyrics_page::line_progress(&starts_of(lyrics), index, now_position(app));
+                super::lyrics_fx::break_dots(ui, size, color, progress, current, time);
+            } else {
+                let text = if line.text.is_empty() {
+                    "\u{266a}"
+                } else {
+                    super::lyrics_fx::typed(&line.text, phase.reveal)
+                };
+                // The translation as the line, as in the scrolling view.
+                if look.translation_first
+                    && phase.reveal >= 1.0
+                    && translation_first(
+                        app,
+                        ui,
+                        index,
+                        text,
+                        size * 1.15,
+                        color,
+                        Sense::hover(),
+                        fill.clone(),
+                    )
+                    .is_some()
+                {
+                    return;
+                }
+                let shown_line = (phase.reveal >= 1.0)
+                    .then(|| {
+                        super::lyrics_ai::lyric_line(
+                            app,
+                            ui,
+                            index,
+                            text,
+                            font.clone(),
+                            (size * 0.55).max(15.0),
+                            color,
+                            Sense::hover(),
+                            fill.clone(),
+                        )
+                    })
+                    .flatten();
+                if shown_line.is_none() {
+                    let slot = ui.painter().add(egui::Shape::Noop);
+                    let galley = match fill.clone().filter(|_| !crate::bidi::is_rtl(text)) {
+                        Some(fill) => super::lyrics_ai::filled_galley(
+                            ui.painter(),
+                            text,
+                            font,
+                            ui.available_width(),
+                            fill,
+                        ),
+                        None => crate::bidi::layout(
+                            ui.painter(),
+                            text,
+                            font,
+                            color,
+                            ui.available_width(),
+                            usize::MAX,
+                            None,
+                        ),
+                    };
+                    let response = ui.add(egui::Label::new(galley.clone()));
+                    super::lyrics_fx::halo(
+                        ui.painter(),
+                        slot,
+                        &galley,
+                        response.rect.min,
+                        (look.glow && current).then_some(bright),
+                        look.outline,
+                    );
+                }
+                super::lyrics_ai::under_line(app, ui, index, (size * 0.55).max(15.0), color);
+            }
+        });
+        let drawn = child.min_rect().height();
+        ui.data_mut(|data| data.insert_temp(height_id, drawn));
+    }
+    if look.motion != crate::lyrics_page::Motion::None {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
+    }
+}
+
+/// Every line's start, for the progress through a line.
+fn starts_of(lyrics: &crate::lyrics::Lyrics) -> Vec<Option<u32>> {
+    lyrics.lines.iter().map(|line| line.at_ms).collect()
+}
+
+/// The playing position with the song's lyrics offset applied.
+fn now_position(app: &App) -> u32 {
+    app.now_playing().map_or(0, |now| {
+        app.settings.lyrics_page.position(&now.uri, now.position_ms)
+    })
 }
 
 #[cfg(test)]
