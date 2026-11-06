@@ -178,10 +178,14 @@ impl ApplicationHandler<Incoming> for Mods {
             // handler WebView2 drops them, and buttons such as ivLyrics'
             // Update do nothing.
             .with_new_window_req_handler(|url, _| {
-                if is_web_link(&url)
-                    && let Err(error) = crate::opener::open(&url)
-                {
-                    report(&format!("could not open a link: {error}"));
+                if is_web_link(&url) {
+                    match crate::opener::open(&url) {
+                        // The updater rewrites the mod's files; ask the app
+                        // to let this process go so nothing holds them.
+                        Ok(()) if is_update_page(&url) => send_command("updating"),
+                        Ok(()) => {}
+                        Err(error) => report(&format!("could not open a link: {error}")),
+                    }
                 }
                 wry::NewWindowResponse::Deny
             })
@@ -303,6 +307,31 @@ fn is_web_link(url: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://")
 }
 
+/// Pages that start a mod's updater. ivLyrics' Update button opens this one,
+/// which hands over to its updater through a custom scheme.
+const UPDATE_PAGES: &[&str] = &["https://lyrics.ivl.is/update"];
+
+/// Whether a link starts a mod's updater, whatever follows the path.
+fn is_update_page(url: &str) -> bool {
+    let url = url.trim();
+    UPDATE_PAGES.iter().any(|page| {
+        url.get(..page.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(page))
+            && matches!(
+                url.as_bytes().get(page.len()),
+                None | Some(b'/' | b'?' | b'#')
+            )
+    })
+}
+
+/// Tells the app something from this process itself, not from the page.
+fn send_command(cmd: &str) {
+    let line = serde_json::json!({ "cmd": cmd });
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
+}
+
 /// Passes a page's message on to the app as one compact JSON line; answers
 /// `ready` here, since only this process holds the latest state.
 fn forward(body: &str, proxy: &EventLoopProxy<Incoming>) {
@@ -387,7 +416,17 @@ fn status(code: StatusCode) -> Response<Cow<'static, [u8]>> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_web_link;
+    use super::{is_update_page, is_web_link};
+
+    #[test]
+    fn only_the_update_page_counts_as_updating() {
+        assert!(is_update_page("https://lyrics.ivl.is/update"));
+        assert!(is_update_page("https://lyrics.ivl.is/update?from=app"));
+        assert!(is_update_page("HTTPS://lyrics.ivl.is/update/"));
+        assert!(!is_update_page("https://lyrics.ivl.is/updates"));
+        assert!(!is_update_page("https://lyrics.ivl.is/"));
+        assert!(!is_update_page("https://example.com/update"));
+    }
 
     #[test]
     fn only_web_links_leave_for_the_browser() {

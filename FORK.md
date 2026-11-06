@@ -61,6 +61,12 @@ folder as `mods/ivLyrics`. Lyrics, translation addons and its settings
 album colours. Demo mode (`--demo`) shows no album colours: the app drops
 backend events there, cover colours included.
 
+Links the page opens in a new window (`target="_blank"`, `window.open`)
+go to the system browser; other schemes are dropped. ivLyrics' Update
+button opens its update page there, and the app then closes the mod's
+page, goes Home and stops the mods process, so the updater can rewrite
+the mod's files.
+
 - Mods folder: `mods` in the config folder (Windows: `%APPDATA%\paolino\spotifast\config\mods`)
 - Webview data, including the mods' settings: `mods-webview` in the data
   folder (Windows: `%LOCALAPPDATA%\paolino\spotifast\data\mods-webview`);

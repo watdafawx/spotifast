@@ -120,6 +120,9 @@ enum Command {
         level: String,
         message: String,
     },
+    /// The mod's updater was started in the browser: close the page, go
+    /// Home and stop the process, so nothing holds the files it rewrites.
+    Updating,
 }
 
 impl Command {
@@ -136,7 +139,9 @@ impl Command {
                 return None;
             }
             // Handled in `sync`, which can see the app and the backend.
-            Command::SetSaved { .. } | Command::Request { .. } => return None,
+            Command::SetSaved { .. } | Command::Request { .. } | Command::Updating => {
+                return None;
+            }
         })
     }
 }
@@ -327,8 +332,10 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
     let Slot::Running(host) = &mut *slot else {
         return;
     };
+    let mut updating = false;
     for command in host.commands.try_iter() {
         match command {
+            Command::Updating => updating = true,
             Command::Request { id, call } => {
                 app.backend
                     .send(BackendCommand::Mods(Box::new(proxy::Request {
@@ -345,6 +352,15 @@ pub fn sync(app: &mut App, ctx: &egui::Context) {
             }
             command => app.actions.extend(command.action()),
         }
+    }
+    if updating {
+        PAGE_OPEN.store(false, Ordering::Relaxed);
+        app.actions.push(Action::Open(crate::model::Page::Home));
+        let Slot::Running(host) = std::mem::replace(&mut *slot, Slot::NotStarted) else {
+            unreachable!("the slot was just matched as running");
+        };
+        host.stop();
+        return;
     }
     let replies: Vec<_> = host.replies.try_iter().collect();
     // The mod's page gives way when the app goes to another page, the way
@@ -591,6 +607,10 @@ mod tests {
             action(r#"{"cmd":"toggle_play"}"#).as_deref(),
             Some("TogglePlay")
         );
+        assert!(matches!(
+            serde_json::from_str::<Command>(r#"{"cmd":"updating"}"#),
+            Ok(Command::Updating)
+        ));
         assert_eq!(
             action(r#"{"cmd":"seek","ms":100000}"#).as_deref(),
             Some("Seek(100000)")
