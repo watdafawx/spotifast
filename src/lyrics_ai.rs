@@ -984,13 +984,16 @@ fn extract_json(text: &str) -> Option<serde_json::Value> {
 
 /// Gives every lyric line the answer for its words, drops lines that only
 /// repeat the original, and drops every translation when the model says
-/// the song is already in the target language.
+/// a Latin-script song is already in the target language. A song with
+/// lines in another script (K-pop with English hooks) keeps them: the model
+/// may name the hooks' language, and the other lines still need theirs.
 fn spread(request: &Request, distinct: &[&str], parsed: Parsed) -> Extras {
     let target = language(request.target).map_or(request.target, Language::base);
-    let same_language = parsed
-        .language
-        .as_deref()
-        .is_some_and(|code| code.split('-').next() == Some(target));
+    let same_language = !request.wanted.pronunciation
+        && parsed
+            .language
+            .as_deref()
+            .is_some_and(|code| code.split('-').next() == Some(target));
     let by_text: std::collections::HashMap<&str, &Extra> =
         distinct.iter().copied().zip(&parsed.lines).collect();
     let lines = request
@@ -1026,6 +1029,9 @@ fn same_words(a: &str, b: &str) -> bool {
 
 // ---- cache -----------------------------------------------------------------
 
+/// 2: answers for mixed-script songs no longer lose their translations.
+const CACHE_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 struct Cached {
     version: u32,
@@ -1046,12 +1052,13 @@ fn read_cache(path: &Path, line_count: usize) -> Option<Extras> {
         return None;
     }
     let cached: Cached = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (cached.version == 1 && cached.extras.lines.len() == line_count).then_some(cached.extras)
+    (cached.version == CACHE_VERSION && cached.extras.lines.len() == line_count)
+        .then_some(cached.extras)
 }
 
 fn write_cache(path: &Path, extras: &Extras) {
     let Ok(bytes) = serde_json::to_vec(&Cached {
-        version: 1,
+        version: CACHE_VERSION,
         extras: extras.clone(),
     }) else {
         return;
@@ -1170,6 +1177,44 @@ mod tests {
         let extras = spread(&request, &distinct, parsed);
         assert!(extras.lines[0].pronunciation.is_some());
         assert_eq!(extras.lines[0].translation, None);
+    }
+
+    #[test]
+    fn a_mixed_script_song_keeps_translations_whatever_language_the_model_names() {
+        let request = request(&["불을 지펴라", "Sit back relax"], BOTH);
+        let distinct = request.distinct();
+        let parsed = parse(
+            r#"{"language":"en","lines":[
+                {"i":1,"pronunciation":"bureul jipyeora","translation":"Light the fire"},
+                {"i":2,"pronunciation":null,"translation":null}]}"#,
+            2,
+        )
+        .unwrap();
+        let extras = spread(&request, &distinct, parsed);
+        assert_eq!(
+            extras.lines[0].translation.as_deref(),
+            Some("Light the fire")
+        );
+        assert_eq!(extras.lines[1], Extra::default());
+
+        // A Latin-script song the model calls English, for an English
+        // reader, gets no translations.
+        let latin = super::tests::request(
+            &["Ich liebe dich"],
+            Wanted {
+                pronunciation: false,
+                translation: true,
+            },
+        );
+        let distinct = latin.distinct();
+        let parsed = Parsed {
+            language: Some("en".into()),
+            lines: vec![Extra {
+                pronunciation: None,
+                translation: Some("I love you".into()),
+            }],
+        };
+        assert_eq!(spread(&latin, &distinct, parsed).lines[0].translation, None);
     }
 
     #[test]
