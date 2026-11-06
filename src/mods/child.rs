@@ -173,6 +173,18 @@ impl ApplicationHandler<Incoming> for Mods {
             .with_initialization_script(SHIM)
             .with_ipc_handler(move |request: Request<String>| forward(request.body(), &proxy))
             .with_custom_protocol("mods".into(), move |_id, request| serve(&dir, &request))
+            // Links that open a new window (`target="_blank"`, `window.open`)
+            // go to the system browser, as they do from Spotify. Without a
+            // handler WebView2 drops them, and buttons such as ivLyrics'
+            // Update do nothing.
+            .with_new_window_req_handler(|url, _| {
+                if is_web_link(&url)
+                    && let Err(error) = crate::opener::open(&url)
+                {
+                    report(&format!("could not open a link: {error}"));
+                }
+                wry::NewWindowResponse::Deny
+            })
             .with_devtools(true)
             .with_url(START_URL);
         // A secure origin, so the page gets the APIs browsers keep for https.
@@ -284,6 +296,13 @@ fn report(message: &str) {
     let _ = stdout.flush();
 }
 
+/// Whether a page may hand this URL to the system browser: web pages only,
+/// never a file, a custom scheme or a script.
+fn is_web_link(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
 /// Passes a page's message on to the app as one compact JSON line; answers
 /// `ready` here, since only this process holds the latest state.
 fn forward(body: &str, proxy: &EventLoopProxy<Incoming>) {
@@ -364,4 +383,19 @@ fn status(code: StatusCode) -> Response<Cow<'static, [u8]>> {
     let mut response = Response::new(Cow::Borrowed(&[][..]));
     *response.status_mut() = code;
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_web_link;
+
+    #[test]
+    fn only_web_links_leave_for_the_browser() {
+        assert!(is_web_link("https://lyrics.ivl.is/update"));
+        assert!(is_web_link("HTTP://example.com"));
+        assert!(!is_web_link("ivLyrics://overlay"));
+        assert!(!is_web_link("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_web_link("javascript:alert(1)"));
+        assert!(!is_web_link("about:blank"));
+    }
 }
