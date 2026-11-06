@@ -575,7 +575,10 @@ impl State {
     /// Line `index` cut into words with their readings, when pronunciation
     /// is on and the words could be matched to the line.
     pub fn words(&self, uri: Option<&str>, index: usize, settings: &AiSettings) -> Option<&[Ruby]> {
-        if !settings.pronounce || uri.is_none() || self.uri.as_deref() != uri {
+        if !(settings.pronounce || settings.translate)
+            || uri.is_none()
+            || self.uri.as_deref() != uri
+        {
             return None;
         }
         self.extras
@@ -618,6 +621,10 @@ pub struct Ruby {
     /// `None` for a piece already in the Latin alphabet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading: Option<String>,
+    /// What the piece means, in the target language; `None` for a word
+    /// already in it, or punctuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gloss: Option<String>,
     /// The line has a space after this piece.
     #[serde(default)]
     pub space: bool,
@@ -639,6 +646,7 @@ pub fn align(line: &str, words: &[Ruby]) -> Option<Vec<Ruby>> {
             out.push(Ruby {
                 text: piece.to_string(),
                 reading: None,
+                gloss: None,
                 space: pieces.peek().is_some(),
             });
         }
@@ -661,18 +669,23 @@ pub fn align(line: &str, words: &[Ruby]) -> Option<Vec<Ruby>> {
             return None;
         }
         push_plain(&mut out, skipped);
-        let reading = word
-            .reading
-            .as_deref()
-            .map(str::trim)
-            .filter(|reading| !reading.is_empty() && !same_words(reading, text));
-        match reading {
-            Some(reading) => out.push(Ruby {
+        let kept = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && !same_words(value, text))
+                .map(str::to_string)
+        };
+        let (reading, gloss) = (kept(&word.reading), kept(&word.gloss));
+        if reading.is_some() || gloss.is_some() {
+            out.push(Ruby {
                 text: text.to_string(),
-                reading: Some(reading.to_string()),
+                reading,
+                gloss,
                 space: false,
-            }),
-            None => push_plain(&mut out, text),
+            });
+        } else {
+            push_plain(&mut out, text);
         }
         rest = &rest[at + text.len()..];
     }
@@ -681,7 +694,7 @@ pub fn align(line: &str, words: &[Ruby]) -> Option<Vec<Ruby>> {
     }
     push_plain(&mut out, rest);
     out.iter()
-        .any(|piece| piece.reading.is_some())
+        .any(|piece| piece.reading.is_some() || piece.gloss.is_some())
         .then_some(out)
 }
 
@@ -715,6 +728,7 @@ fn align_by_characters(line: &str, pronunciation: &str) -> Option<Vec<Ruby>> {
         .map(|c| Ruby {
             text: c.to_string(),
             reading: syllables.next().map(str::to_string),
+            gloss: None,
             space: false,
         })
         .collect();
@@ -736,6 +750,7 @@ fn align_by_spaces(line: &str, pronunciation: &str) -> Option<Vec<Ruby>> {
         .map(|(text, reading)| Ruby {
             text: text.to_string(),
             reading: Some(reading.to_string()),
+            gloss: None,
             space: false,
         })
         .collect();
@@ -849,11 +864,11 @@ fn prompt(request: &Request, distinct: &[&str]) -> (String, String) {
     let mut fields = Vec::new();
     if request.wanted.pronunciation {
         fields.push("\"pronunciation\": string or null");
-        fields.push("\"words\": [[original, reading or null], ...]");
     }
     if request.wanted.translation {
         fields.push("\"translation\": string or null");
     }
+    fields.push("\"words\": [[original, reading or null, meaning or null], ...]");
     user.push_str(&format!(
         "\nAnswer with this JSON: {{\"language\": ISO 639-1 code of the lyrics' main \
          language, \"lines\": [{{\"i\": line number, {}}}]}}, with exactly one entry for \
@@ -869,16 +884,30 @@ fn prompt(request: &Request, distinct: &[&str]) -> (String, String) {
              usual transliteration for any other script. Keep words already in the Latin \
              alphabet as they are. null for a line written entirely in the Latin alphabet.\n",
         );
-        user.push_str(
-            "- words: the same line cut into its words, in order, each as [original, reading]. \
-             original is copied exactly from the line, so the originals rebuild it; reading is \
-             that word's part of the pronunciation, or null for a word already in the Latin \
-             alphabet. Keep the pieces short, one word each, never a whole phrase: Chinese \
-             in words of one to three characters, Japanese in single words with their \
-             particles apart and kanji kept with their okurigana. Put spaces between the \
-             syllables of a Chinese reading.\n",
-        );
     }
+    user.push_str(&format!(
+        "- words: the same line cut into its words, in order, each as [original, reading, \
+         meaning]. original is copied exactly from the line, so the originals rebuild it. \
+         Keep the pieces short, one word each, never a whole phrase: Chinese in words of one \
+         to three characters, Japanese in single words with their particles apart and kanji \
+         kept with their okurigana. {} {}\n",
+        if request.wanted.pronunciation {
+            "reading is that word's part of the pronunciation (spaces between the syllables \
+             of a Chinese reading), or null for a word already in the Latin alphabet."
+        } else {
+            "reading is always null."
+        },
+        if request.wanted.translation {
+            format!(
+                "meaning is that word's meaning in {} in one to three words, as it is meant in \
+                 this line, or null for punctuation, sounds such as \"oh\", and words already \
+                 in {}.",
+                target.english, target.english
+            )
+        } else {
+            "meaning is always null.".to_string()
+        }
+    ));
     if request.wanted.translation {
         user.push_str(&format!(
             "- translation: the line's meaning in natural {} ({}), read in the context of the \
@@ -1132,21 +1161,24 @@ pub fn parse(text: &str, count: usize) -> Result<Parsed, String> {
 /// `["원문", "reading"]`, or `{"text": .., "reading": ..}` from a model
 /// that prefers objects.
 fn ruby_piece(value: &serde_json::Value) -> Option<Ruby> {
-    let (text, reading) = match value {
-        serde_json::Value::Array(pair) => (pair.first()?, pair.get(1)),
+    let (text, reading, gloss) = match value {
+        serde_json::Value::Array(parts) => (parts.first()?, parts.get(1), parts.get(2)),
         serde_json::Value::Object(fields) => (
             fields.get("text").or_else(|| fields.get("original"))?,
             fields
                 .get("reading")
                 .or_else(|| fields.get("pronunciation")),
+            fields.get("meaning").or_else(|| fields.get("gloss")),
         ),
         _ => return None,
     };
+    let string = |value: Option<&serde_json::Value>| {
+        value.and_then(|value| value.as_str()).map(str::to_string)
+    };
     Some(Ruby {
         text: text.as_str()?.to_string(),
-        reading: reading
-            .and_then(|reading| reading.as_str())
-            .map(str::to_string),
+        reading: string(reading),
+        gloss: string(gloss),
         space: false,
     })
 }
@@ -1200,18 +1232,32 @@ fn spread(request: &Request, distinct: &[&str], parsed: Parsed) -> Extras {
                 |text: &Option<String>| text.clone().filter(|text| !same_words(text, original));
             let pronunciation =
                 differs(&extra.pronunciation).filter(|_| request.wanted.pronunciation);
-            let words = pronunciation.as_ref().and_then(|pronunciation| {
-                extra
-                    .words
-                    .as_deref()
-                    .and_then(|words| align(original, words))
-                    .or_else(|| align_by_spaces(original, pronunciation))
-                    .or_else(|| align_by_characters(original, pronunciation))
-            });
+            let glosses = request.wanted.translation && !same_language;
+            let words = extra
+                .words
+                .as_deref()
+                .and_then(|words| {
+                    let words: Vec<Ruby> = words
+                        .iter()
+                        .map(|word| Ruby {
+                            reading: word
+                                .reading
+                                .clone()
+                                .filter(|_| request.wanted.pronunciation),
+                            gloss: word.gloss.clone().filter(|_| glosses),
+                            ..word.clone()
+                        })
+                        .collect();
+                    align(original, &words)
+                })
+                .or_else(|| {
+                    let pronunciation = pronunciation.as_deref()?;
+                    align_by_spaces(original, pronunciation)
+                        .or_else(|| align_by_characters(original, pronunciation))
+                });
             Extra {
                 pronunciation,
-                translation: differs(&extra.translation)
-                    .filter(|_| request.wanted.translation && !same_language),
+                translation: differs(&extra.translation).filter(|_| glosses),
                 words,
             }
         })
@@ -1235,7 +1281,8 @@ fn same_words(a: &str, b: &str) -> bool {
 /// 3: readings word by word.
 /// 4: shorter pieces, so readings do not run together.
 /// 5: Chinese lines whose pieces do not match pair character by character.
-const CACHE_VERSION: u32 = 5;
+/// 6: each word's meaning under it.
+const CACHE_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
@@ -1389,6 +1436,7 @@ mod tests {
         Ruby {
             text: text.into(),
             reading: reading.map(Into::into),
+            gloss: None,
             space: false,
         }
     }
@@ -1472,6 +1520,57 @@ mod tests {
             align_by_characters("沒想到 yeah", "méi xiǎng dào yeah"),
             None
         );
+    }
+
+    #[test]
+    fn each_word_carries_its_meaning_under_it() {
+        let parsed = parse(
+            r#"{"language":"zh","lines":[{"i":1,"pronunciation":"dàn piān piān","translation":"But unfortunately",
+                "words":[["但","dàn","but"],["偏偏","piān piān","unfortunately"]]}]}"#,
+            1,
+        )
+        .unwrap();
+        let request = request(&["但偏偏"], BOTH);
+        let extras = spread(&request, &request.distinct(), parsed);
+        let words = extras.lines[0].words.as_ref().unwrap();
+        assert_eq!(words[1].reading.as_deref(), Some("piān piān"));
+        assert_eq!(words[1].gloss.as_deref(), Some("unfortunately"));
+
+        // Translation off: the words keep their readings and lose meanings.
+        let parsed = parse(
+            r#"{"lines":[{"i":1,"pronunciation":"dàn piān piān","words":[["但","dàn","but"],["偏偏","piān piān","unfortunately"]]}]}"#,
+            1,
+        )
+        .unwrap();
+        let readings_only = super::tests::request(
+            &["但偏偏"],
+            Wanted {
+                pronunciation: true,
+                translation: false,
+            },
+        );
+        let extras = spread(&readings_only, &readings_only.distinct(), parsed);
+        let words = extras.lines[0].words.as_ref().unwrap();
+        assert_eq!(words[0].gloss, None);
+        assert_eq!(words[0].reading.as_deref(), Some("dàn"));
+
+        // A Latin-script song gets meanings alone.
+        let spanish = super::tests::request(
+            &["te quiero"],
+            Wanted {
+                pronunciation: false,
+                translation: true,
+            },
+        );
+        let parsed = parse(
+            r#"{"lines":[{"i":1,"translation":"I love you","words":[["te",null,"you"],["quiero",null,"I want"]]}]}"#,
+            1,
+        )
+        .unwrap();
+        let extras = spread(&spanish, &spanish.distinct(), parsed);
+        let words = extras.lines[0].words.as_ref().unwrap();
+        assert_eq!(words[1].gloss.as_deref(), Some("I want"));
+        assert!(words[0].space);
     }
 
     #[test]

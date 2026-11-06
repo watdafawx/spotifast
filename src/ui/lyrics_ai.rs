@@ -37,7 +37,14 @@ pub(super) fn lyric_line(
     let reading_color = color.gamma_multiply(0.85);
     let drawn = ui.scope(|ui| match words {
         Some(words) if !crate::bidi::is_rtl(text) => {
-            ruby(ui, words, &font, &reading_font, color, reading_color);
+            ruby(
+                ui,
+                words,
+                &font,
+                &reading_font,
+                color,
+                (settings.pronounce, settings.translate),
+            );
         }
         _ => {
             if let Some(pronunciation) = pronunciation {
@@ -55,41 +62,54 @@ pub(super) fn lyric_line(
     Some(response)
 }
 
-/// Each word with its reading above it, wrapping word by word.
+/// Each word with its reading above it and its meaning below, wrapping
+/// word by word. `shown` is (readings, meanings) as the settings want them.
 fn ruby(
     ui: &mut egui::Ui,
     words: &[crate::lyrics_ai::Ruby],
     font: &FontId,
     reading_font: &FontId,
     color: Color32,
-    reading_color: Color32,
+    shown: (bool, bool),
 ) {
+    let reading_color = color.gamma_multiply(0.85);
+    let gloss_color = color.gamma_multiply(0.6);
     let painter = ui.painter().clone();
     let space = painter
         .layout_no_wrap(" ".into(), font.clone(), color)
         .size()
         .x;
-    // Every word keeps a reading row, read or not, so words line up.
-    let reading_height = painter
+    let row = painter
         .layout_no_wrap("Ag".into(), reading_font.clone(), reading_color)
         .size()
         .y;
+    // Every word keeps the line's reading and meaning rows, read or not,
+    // so the words line up.
+    let readings = shown.0 && words.iter().any(|word| word.reading.is_some());
+    let glosses = shown.1 && words.iter().any(|word| word.gloss.is_some());
+    let reading_height = if readings { row } else { 0.0 };
+    let gloss_height = if glosses { row } else { 0.0 };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
         for word in words {
             let main = painter.layout_no_wrap(word.text.clone(), font.clone(), color);
-            let reading = word.reading.as_ref().map(|reading| {
-                painter.layout_no_wrap(reading.clone(), reading_font.clone(), reading_color)
-            });
+            let small = |text: &Option<String>, on: bool, color: Color32| {
+                text.as_ref()
+                    .filter(|_| on)
+                    .map(|text| painter.layout_no_wrap(text.clone(), reading_font.clone(), color))
+            };
+            let reading = small(&word.reading, readings, reading_color);
+            let gloss = small(&word.gloss, glosses, gloss_color);
             // Readings wider than their word keep a little room on each
             // side, so neighbours never run together.
-            let width = main.size().x.max(
-                reading
+            let room = |galley: &Option<std::sync::Arc<egui::Galley>>| {
+                galley
                     .as_ref()
-                    .map_or(0.0, |galley| galley.size().x + reading_height * 0.5),
-            );
+                    .map_or(0.0, |galley| galley.size().x + row * 0.5)
+            };
+            let width = main.size().x.max(room(&reading)).max(room(&gloss));
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(width, reading_height + main.size().y),
+                egui::vec2(width, reading_height + main.size().y + gloss_height),
                 egui::Sense::hover(),
             );
             if let Some(reading) = reading {
@@ -100,7 +120,15 @@ fn ruby(
                 rect.center().x - main.size().x / 2.0,
                 rect.top() + reading_height,
             );
+            let main_height = main.size().y;
             ui.painter().galley(at, main, color);
+            if let Some(gloss) = gloss {
+                let at = egui::pos2(
+                    rect.center().x - gloss.size().x / 2.0,
+                    rect.top() + reading_height + main_height,
+                );
+                ui.painter().galley(at, gloss, gloss_color);
+            }
             if word.space {
                 ui.add_space(space);
             }
