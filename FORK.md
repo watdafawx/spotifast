@@ -137,9 +137,20 @@ follows the song's position, lined up by matching the video's captions
 (its own or YouTube's automatic ones) to the timed lyrics (seek on
 drift over 0.5 s, pause with the
 song) and stops 30 s after full screen closes. Settings: Lyrics extras →
-Video background. Needs `libmpv-2.dll` (shinchiro's mpv-winbuild) and a
-current `yt-dlp.exe` beside Spotifast or on PATH. ivLyrics' community
-video service is not used: it answers other apps with a warning video.
+Video background. ivLyrics' community video service is not used: it
+answers other apps with a warning video.
+
+Video needs `libmpv-2.dll` and `yt-dlp.exe`. Each is looked for beside
+`spotifast.exe` first, then on PATH; the fork's Windows releases bundle
+both (see Releases), so nothing is installed by hand. When either is
+missing, Settings → Lyrics extras and the lyrics page's Video panel say
+which, and the switch is not offered. A failed search (most often an
+out-of-date yt-dlp after a YouTube change) or mpv failing to start shows a
+quiet line in that panel; the cover stays. yt-dlp ages faster than
+releases: a newer `yt-dlp.exe` dropped in beside Spotifast, or
+`yt-dlp.exe -U` run there, is used after a restart, and updates keep it
+(the installer keeps a newer file version; a portable update replaces
+only `spotifast.exe`). There is no auto-updater for it.
 
 ## Lyrics page (native)
 
@@ -226,6 +237,21 @@ signs it (`checksums.txt.sig`) and publishes the release under upstream's
 version number, moving the fork's `v*` tag to the `mods` commit. Run it by
 hand with `force` to replace the current version's release after a
 fork-only change.
+
+The Windows zip and setup program also carry the video components, pinned
+in the workflow's "Video components" step and checked against SHA-256
+digests before packaging, so `checksums.txt` and its signature cover them:
+
+| File | Version | Source | Licence |
+| --- | --- | --- | --- |
+| `libmpv-2.dll` | shinchiro mpv-dev x86_64 20261101 (mpv `48fca90e8c`) | [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake), SourceForge mirror as fallback | GPL (mpv is GPL 2+ or LGPL 2.1+; this build includes GPL libraries such as x264 and x265) |
+| `yt-dlp.exe` | 2026.10.26 | [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases) | Unlicense (the bundled Python runtime and libraries keep their own licences) |
+
+`packaging/windows/third-party-video.txt` ships beside them with the
+licences and source links. To move to newer builds, change the six values
+in that step, this table and that file together. A portable copy that
+updates itself replaces only `spotifast.exe`, so a portable folder from
+before the video components were bundled gets them from a fresh zip.
 
 Builds with mods only accept updates signed with the fork's Ed25519 key
 (`assets/update-public-key-mods.hex`). The private key is the

@@ -80,6 +80,13 @@ Source: "{#Binary}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "spotifast-installer.txt"; DestDir: "{app}"; Flags: ignoreversion
+#ifdef VideoDir
+; Fork (Release mods): the video behind full-screen lyrics. yt-dlp.exe has
+; no ignoreversion, so a newer one the user put in its place is kept.
+Source: "{#VideoDir}\libmpv-2.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#VideoDir}\yt-dlp.exe"; DestDir: "{app}"
+Source: "third-party-video.txt"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"

@@ -382,16 +382,14 @@ pub(super) fn settings(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> b
         },
     );
     let available = crate::lyrics_video::available();
-    let video_note = if available {
-        gettext(
+    let video_note = match crate::lyrics_video::missing() {
+        Some(missing) => missing.note(locale),
+        None if available => gettext(
             locale,
             "A community-picked music video behind full-screen lyrics, in time with the song.",
         )
-    } else {
-        gettext(
-            locale,
-            "Needs libmpv-2.dll and yt-dlp.exe beside Spotifast or on the system path.",
-        )
+        .into_owned(),
+        None => gettext(locale, "Video backgrounds are available on Windows.").into_owned(),
     };
     widgets::setting_row(
         ui,

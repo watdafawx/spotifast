@@ -534,6 +534,29 @@ fn choice_row(
     picked
 }
 
+/// Why there is no video, said quietly in the Video panel: a missing
+/// libmpv or yt-dlp, mpv failing to start, or a failed search (most often
+/// an out-of-date yt-dlp).
+fn video_note(app: &App) -> Option<String> {
+    let locale = app.locale;
+    if let Some(missing) = crate::lyrics_video::missing() {
+        return Some(missing.note(locale));
+    }
+    if !app.settings.lyrics_video {
+        return None;
+    }
+    if app.lyrics_video.failed {
+        return Some(gettext(locale, "The video player could not start.").into_owned());
+    }
+    app.lyrics_video.search_failed.then(|| {
+        gettext(
+            locale,
+            "The video search failed. A newer yt-dlp.exe beside Spotifast may fix it.",
+        )
+        .into_owned()
+    })
+}
+
 /// The Appearance panel, in groups. True when a setting changed.
 fn appearance(app: &mut App, ui: &mut egui::Ui, palette: &Palette, video_shown: bool) -> bool {
     use crate::lyrics_page::{Enter, Leave, LineStyle, Motion};
@@ -726,6 +749,17 @@ fn ai_panel(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> bool {
             &gettext(locale, "Video background"),
             &mut app.settings.lyrics_video,
         );
+    }
+    if let Some(note) = video_note(app) {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(note)
+                    .font(theme::regular(12.0))
+                    .color(palette.secondary),
+            )
+            .wrap(),
+        );
+        ui.add_space(8.0);
     }
     #[cfg(feature = "mods")]
     {

@@ -506,19 +506,104 @@ pub fn estimate_offset(cues: &[(f64, String)], lyrics: &[(u32, String)]) -> Opti
     best.filter(|(lines, _)| *lines >= 3).map(|(_, gap)| gap)
 }
 
-/// yt-dlp beside the app, else on the search path.
-pub fn yt_dlp() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            Some(exe.parent()?.join(if cfg!(windows) {
-                "yt-dlp.exe"
-            } else {
-                "yt-dlp"
-            }))
+/// yt-dlp's file name on this platform.
+const YT_DLP: &str = if cfg!(windows) {
+    "yt-dlp.exe"
+} else {
+    "yt-dlp"
+};
+
+/// yt-dlp to run: the one beside the app (Windows releases bundle one,
+/// and a newer one dropped in its place is used), else the first on the
+/// search path. Looked for once a run.
+pub fn yt_dlp_path() -> Option<&'static Path> {
+    static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let beside = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(Path::to_path_buf));
+            let found = locate(
+                beside.as_deref(),
+                std::env::var_os("PATH").as_deref(),
+                YT_DLP,
+            );
+            match &found {
+                Some(path) => log::info!("lyrics video: yt-dlp at {}", path.display()),
+                None => log::info!("lyrics video: no yt-dlp, so no video backgrounds"),
+            }
+            found
         })
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from("yt-dlp"))
+        .as_deref()
+}
+
+/// `name` in `beside` (the app's folder), else in the first folder of
+/// `search_path` (PATH) that has it.
+fn locate(
+    beside: Option<&Path>,
+    search_path: Option<&std::ffi::OsStr>,
+    name: &str,
+) -> Option<PathBuf> {
+    beside
+        .into_iter()
+        .map(Path::to_path_buf)
+        .chain(search_path.into_iter().flat_map(std::env::split_paths))
+        .map(|folder| folder.join(name))
+        .find(|path| path.is_file())
+}
+
+/// The yt-dlp to run; the bare name when none was found, so the error
+/// says what is missing.
+fn yt_dlp() -> PathBuf {
+    yt_dlp_path().map_or_else(|| PathBuf::from(YT_DLP), Path::to_path_buf)
+}
+
+/// What video backgrounds lack on this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    Libmpv,
+    YtDlp,
+    Both,
+}
+
+impl Missing {
+    fn from(libmpv: bool, yt_dlp: bool) -> Option<Self> {
+        match (libmpv, yt_dlp) {
+            (true, true) => None,
+            (false, true) => Some(Self::Libmpv),
+            (true, false) => Some(Self::YtDlp),
+            (false, false) => Some(Self::Both),
+        }
+    }
+
+    /// A short, quiet line for the settings that say why there is no video.
+    pub fn note(self, locale: crate::i18n::Locale) -> String {
+        use crate::i18n::gettext;
+        gettext(
+            locale,
+            match self {
+                Self::Libmpv => "Video backgrounds need libmpv-2.dll beside Spotifast.",
+                Self::YtDlp => "Video backgrounds need yt-dlp.exe beside Spotifast.",
+                Self::Both => {
+                    "Video backgrounds need libmpv-2.dll and yt-dlp.exe beside Spotifast."
+                }
+            },
+        )
+        .into_owned()
+    }
+}
+
+/// What video backgrounds lack here; `None` when they can work, or on
+/// systems they are not made for (only Windows has them).
+pub fn missing() -> Option<Missing> {
+    #[cfg(windows)]
+    {
+        Missing::from(mpv::available(), yt_dlp_path().is_some())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 fn read_cache(path: &Path) -> Option<Option<VideoInfo>> {
@@ -583,6 +668,9 @@ pub struct State {
     pub last_seek: Option<std::time::Instant>,
     /// mpv could not start; not tried again this run.
     pub failed: bool,
+    /// The last search for a video failed (yt-dlp did not run or could
+    /// not search, often because YouTube changed and it is out of date).
+    pub search_failed: bool,
     /// Frames drawn while lyrics were on screen, and since when, for the
     /// frame rate in the debug log.
     pub frames: (u32, Option<std::time::Instant>),
@@ -591,11 +679,12 @@ pub struct State {
     pub frame_gap: (Option<std::time::Instant>, Duration),
 }
 
-/// Whether video backgrounds can work here: Windows with libmpv.
+/// Whether video backgrounds can work here: Windows with libmpv and
+/// yt-dlp.
 pub fn available() -> bool {
     #[cfg(windows)]
     {
-        mpv::available()
+        missing().is_none()
     }
     #[cfg(not(windows))]
     {
@@ -1013,5 +1102,36 @@ mod tests {
         write_cache(&path, &None);
         assert_eq!(read_cache(&path), Some(None));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn yt_dlp_beside_the_app_comes_before_the_search_path() {
+        let root = std::env::temp_dir().join(format!("spotifast-yt-dlp-{}", std::process::id()));
+        let (app, on_path, empty) = (root.join("app"), root.join("bin"), root.join("empty"));
+        for folder in [&app, &on_path, &empty] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        std::fs::write(on_path.join(YT_DLP), b"").unwrap();
+        let search = std::env::join_paths([&empty, &on_path]).unwrap();
+        assert_eq!(
+            locate(Some(&app), Some(&search), YT_DLP),
+            Some(on_path.join(YT_DLP))
+        );
+        // A copy dropped in beside the app wins over the one on PATH.
+        std::fs::write(app.join(YT_DLP), b"").unwrap();
+        assert_eq!(
+            locate(Some(&app), Some(&search), YT_DLP),
+            Some(app.join(YT_DLP))
+        );
+        assert_eq!(locate(Some(&empty), None, YT_DLP), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn video_needs_both_libmpv_and_yt_dlp() {
+        assert_eq!(Missing::from(true, true), None);
+        assert_eq!(Missing::from(false, true), Some(Missing::Libmpv));
+        assert_eq!(Missing::from(true, false), Some(Missing::YtDlp));
+        assert_eq!(Missing::from(false, false), Some(Missing::Both));
     }
 }

@@ -1,8 +1,9 @@
 //! Fork: libmpv, loaded at run time, drawing a video into the window.
 //!
 //! `libmpv-2.dll` is looked for beside the app and then on the search
-//! path; without it there is simply no video. mpv streams YouTube through
-//! yt-dlp (beside the app, or on PATH), without sound, and draws each
+//! path (Windows releases bundle it); without it the settings say so and
+//! there is no video. mpv streams YouTube through yt-dlp
+//! ([`super::yt_dlp_path`]), without sound, and draws each
 //! frame with its OpenGL render API into a texture of ours inside egui's
 //! paint callback, which is then copied under the lyrics. Nothing here
 //! blocks: commands are asynchronous and state arrives as events, read
@@ -350,14 +351,10 @@ impl Player {
             ),
             ("demuxer-max-bytes", "64MiB".into()),
         ];
-        if let Some(beside) = std::env::current_exe()
-            .ok()
-            .and_then(|exe| Some(exe.parent()?.join("yt-dlp.exe")))
-            .filter(|path| path.exists())
-        {
+        if let Some(yt_dlp) = super::yt_dlp_path() {
             options.push((
                 "script-opts",
-                format!("ytdl_hook-ytdl_path={}", beside.display()),
+                format!("ytdl_hook-ytdl_path={}", yt_dlp.display()),
             ));
         }
         for (name, value) in &options {

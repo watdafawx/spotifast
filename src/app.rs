@@ -3105,7 +3105,9 @@ impl App {
                 Event::LyricsExtras { id, result } => self.receive_lyrics_extras(&id, result),
                 Event::LyricsVideo { uri, result } => {
                     if self.lyrics_video.uri.as_deref() == Some(uri.as_str()) {
-                        // A failed lookup shows the cover, as no video does.
+                        // A failed lookup shows the cover, as no video does,
+                        // and a quiet line in the lyrics page's Video panel.
+                        self.lyrics_video.search_failed = result.is_err();
                         self.lyrics_video.info = Some(result.ok().flatten());
                     }
                 }

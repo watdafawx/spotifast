@@ -93,13 +93,47 @@ jobs:
           $version = (& $binary --version | Out-String).Trim()
           if ($version -ne "spotifast $($env:TAG.TrimStart('v'))") { throw "Unexpected --version output: $version" }
 
+      # Video behind full-screen lyrics (src/lyrics_video.rs) loads
+      # libmpv-2.dll and runs yt-dlp.exe from beside spotifast.exe. Both are
+      # pinned and checked against these digests, then shipped in the zip
+      # and the installer, so checksums.txt and its signature cover them.
+      # shinchiro keeps about six weeks of daily builds on GitHub; the same
+      # files stay on the project's SourceForge mirror after that.
+      # Moving to newer builds changes all six values together, and the
+      # versions in FORK.md and packaging/windows/third-party-video.txt.
+      - name: Video components
+        shell: bash
+        env:
+          MPV_BUILD: "20261101"
+          MPV_ARCHIVE: mpv-dev-x86_64-20261101-git-48fca90e8c.7z
+          MPV_ARCHIVE_SHA256: 30d3f9fa121ce24638610a9ae52f8957743f9dea416dd37dc4ff7e43589ef843
+          LIBMPV_SHA256: f40293dc5f4012f3f7bcc79de2b9bfb66309b87dbd33a47ee49ebff716eb8154
+          YT_DLP_VERSION: "2026.10.26"
+          YT_DLP_SHA256: f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d
+        run: |
+          mkdir -p video
+          cd video
+          curl -fsSL --retry 3 -o mpv.7z \
+            "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/${MPV_BUILD}/${MPV_ARCHIVE}" \
+            || curl -fsSL --retry 3 -o mpv.7z \
+              "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/${MPV_ARCHIVE}"
+          echo "${MPV_ARCHIVE_SHA256}  mpv.7z" | sha256sum -c -
+          7z e -y mpv.7z libmpv-2.dll > /dev/null
+          rm mpv.7z
+          echo "${LIBMPV_SHA256}  libmpv-2.dll" | sha256sum -c -
+          curl -fsSL --retry 3 -o yt-dlp.exe \
+            "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp.exe"
+          echo "${YT_DLP_SHA256}  yt-dlp.exe" | sha256sum -c -
+          test "$(./yt-dlp.exe --version | tr -d '\r')" = "$YT_DLP_VERSION"
+
       # The names the updater asks for: spotifast-<tag>-<target>.zip and -setup.exe
       - name: Package
         shell: bash
         run: |
           name="spotifast-${TAG}-${TARGET}"
           mkdir -p "dist/$name"
-          cp "target/${TARGET}/release/spotifast.exe" README.md LICENSE packaging/spotifast-portable.txt "dist/$name/"
+          cp "target/${TARGET}/release/spotifast.exe" README.md LICENSE packaging/spotifast-portable.txt \
+            video/libmpv-2.dll video/yt-dlp.exe packaging/windows/third-party-video.txt "dist/$name/"
           cd dist
           7z a "$name.zip" "$name"
           rm -r "$name"
@@ -110,6 +144,7 @@ jobs:
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           & $iscc "/DVersion=$($env:TAG.TrimStart('v'))" "/DArch=x86_64" `
             "/DBinary=$PWD\target\$env:TARGET\release\spotifast.exe" `
+            "/DVideoDir=$PWD\video" `
             "/DOutputDir=$PWD\dist" packaging\windows\spotifast.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
