@@ -6450,6 +6450,7 @@ dependencies = [
  "jiff",
  "keyring-core",
  "libc",
+ "librespot-audio",
  "librespot-connect",
  "librespot-core",
  "librespot-metadata",

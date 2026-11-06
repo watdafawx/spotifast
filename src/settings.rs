@@ -320,6 +320,10 @@ pub struct Settings {
     /// A dim line of the playing song's artists' genres under the artist
     /// names in the player bar. Older files without it show the line.
     pub player_bar_genres: bool,
+    /// Draw the seek bar as the song's waveform: how loud it is along its
+    /// whole length, the played part bright. Worked out from the sound
+    /// itself and kept per song in the cache.
+    pub seek_waveform: bool,
     /// How many frames a second the player bar's visualizer and the mini
     /// player's analyser draw; 0 is uncapped. MilkDrop has its own.
     pub visualizer_fps: u32,
@@ -516,6 +520,7 @@ impl Default for Settings {
             player_bar_vis: PlayerBarVis::Off,
             player_bar_vis_click: true,
             player_bar_genres: true,
+            seek_waveform: false,
             visualizer_fps: crate::milkdrop::DEFAULT_FPS,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
             sidebar_visible: true,
@@ -1574,6 +1579,19 @@ mod tests {
         assert_eq!(PlayerBarVis::Off.next(), PlayerBarVis::Spectrum);
         assert_eq!(PlayerBarVis::Spectrum.next(), PlayerBarVis::Waveform);
         assert_eq!(PlayerBarVis::Waveform.next(), PlayerBarVis::Off);
+    }
+
+    #[test]
+    fn the_waveform_seek_bar_is_opt_in_and_round_trips() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.seek_waveform);
+        let on = Settings {
+            seek_waveform: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&on).unwrap();
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert!(restored.seek_waveform);
     }
 
     #[test]

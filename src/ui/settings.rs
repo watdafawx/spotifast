@@ -1242,6 +1242,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let player_bar_vis = gettext(locale, "Player bar visualizer");
     let player_bar_vis_click = gettext(locale, "Click player bar to change visualizer");
     let player_bar_genres = gettext(locale, "Genres in player bar");
+    let seek_waveform = gettext(locale, "Waveform seek bar");
     // Follow system's own light and dark palettes. Omarchy's palette already
     // follows the desktop, so they are offered only without it.
     let show_pair = app.settings.custom_theme.is_none()
@@ -1362,6 +1363,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             gettext(
                 locale,
                 "Show the playing song's genres under the artist names.",
+            ),
+        ),
+        RowText::new(
+            seek_waveform.clone(),
+            gettext(
+                locale,
+                "Draw the seek bar as the song's waveform. It fills in as a song first plays and is kept for next time.",
             ),
         ),
     ];
@@ -1609,6 +1617,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         &palette,
                         &player_bar_genres,
                         &mut app.settings.player_bar_genres,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                },
+            );
+            filtered_row(
+                ui,
+                &palette,
+                &needle,
+                &appearance,
+                &appearance_rows[14],
+                |ui| {
+                    if widgets::switch(
+                        ui,
+                        &palette,
+                        &seek_waveform,
+                        &mut app.settings.seek_waveform,
                     )
                     .changed()
                     {

@@ -141,6 +141,9 @@ librespot-core = { version = "0.8", default-features = false, features = ["rustl
 librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-connect = { version = "0.8", default-features = false }
 librespot-metadata = { version = "0.8", default-features = false }
+# Decrypts a song librespot already cached, for the waveform seek bar
+# (src/seekwave.rs). Already in the tree through librespot-playback.
+librespot-audio = { version = "0.8", default-features = false }
 librespot-protocol = { version = "0.8", default-features = false }
 # Parses the rootlist's playlist4 protobuf, the same crate librespot generates with.
 protobuf = "3"

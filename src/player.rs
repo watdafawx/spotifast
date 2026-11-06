@@ -490,6 +490,8 @@ pub struct Engine {
     /// The player came from a dropped session and still plays what that
     /// session left it, until something is loaded through this one.
     carrying: std::sync::atomic::AtomicBool,
+    /// The waveform seek bar's picture, which asks this session for keys.
+    seek_wave: Arc<crate::seekwave::SeekWave>,
 }
 
 impl Engine {
@@ -514,6 +516,7 @@ impl Engine {
             ..SessionConfig::default()
         };
         let session = Session::new(session_config, Some(cache));
+        config.tap.seek_wave.set_session(Some(session.clone()));
         let carrying = kept.is_some();
         let (player, mixer, state, audio) = match kept {
             Some(kept) => (kept.player, kept.mixer, kept.state, kept.audio),
@@ -606,6 +609,7 @@ impl Engine {
             closing,
             audio,
             carrying: std::sync::atomic::AtomicBool::new(carrying),
+            seek_wave: Arc::clone(&config.tap.seek_wave),
         })
     }
 
@@ -670,6 +674,10 @@ impl Engine {
             Arc::clone(&state),
             Arc::clone(notify),
             Arc::clone(&audio),
+            SeekWaveFeed {
+                wave: Arc::clone(&config.tap.seek_wave),
+                eq: Arc::clone(&config.eq),
+            },
         ));
         Ok((player, mixer, state, audio))
     }
@@ -818,6 +826,7 @@ impl Engine {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.spirc.shutdown();
         self.player.stop();
+        self.seek_wave.forget_session(&self.session.session_id());
     }
 
     /// Ends the session but leaves the player playing, for an engine that
@@ -826,6 +835,7 @@ impl Engine {
         self.closing
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.spirc.shutdown();
+        self.seek_wave.forget_session(&self.session.session_id());
     }
 
     pub fn resume_point(&self) -> Option<PlaybackResume> {
@@ -1065,6 +1075,7 @@ async fn run_events(
     state: Arc<Mutex<LocalState>>,
     notify: Notify,
     audio: Arc<AudioControl>,
+    seek_wave: SeekWaveFeed,
 ) {
     let mut play_request_id = None;
     while let Some(event) = events.recv().await {
@@ -1081,6 +1092,7 @@ async fn run_events(
             continue;
         }
         audio.handle_player_event(&event);
+        seek_wave.handle_player_event(&event);
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
             if apply_event(&mut current, event) {
@@ -1093,6 +1105,176 @@ async fn run_events(
             notify(EngineEvent::State(snapshot));
         }
     }
+}
+
+/// What the player's events tell the waveform seek bar.
+struct SeekWaveFeed {
+    wave: Arc<crate::seekwave::SeekWave>,
+    eq: crate::eq::SharedEq,
+}
+
+impl SeekWaveFeed {
+    fn handle_player_event(&self, event: &PlayerEvent) {
+        if !self.wave.enabled() {
+            return;
+        }
+        match event {
+            PlayerEvent::TrackChanged { audio_item } => {
+                let generation = self.wave.follow(&audio_item.uri, audio_item.duration_ms, 0);
+                if self.wave.wants(generation) {
+                    tokio::spawn(complete_seek_wave(
+                        Arc::clone(&self.wave),
+                        generation,
+                        audio_item.as_ref().clone(),
+                        Arc::clone(&self.eq),
+                    ));
+                }
+            }
+            PlayerEvent::Loading {
+                track_id,
+                position_ms,
+                ..
+            }
+            | PlayerEvent::Playing {
+                track_id,
+                position_ms,
+                ..
+            }
+            | PlayerEvent::Seeked {
+                track_id,
+                position_ms,
+                ..
+            }
+            | PlayerEvent::PositionCorrection {
+                track_id,
+                position_ms,
+                ..
+            } => self.wave.anchor(&track_id.to_uri(), *position_ms),
+            _ => {}
+        }
+    }
+}
+
+/// How long a song plays before its cached file is decoded, so skipping
+/// through songs never asks Spotify for extra keys.
+const SEEK_WAVE_SETTLE: Duration = Duration::from_secs(5);
+/// How often to look for the song's file in librespot's audio cache.
+const SEEK_WAVE_POLL: Duration = Duration::from_secs(2);
+
+/// Completes the waveform of the song in `item` from librespot's audio
+/// cache once its whole file is there: the file is decrypted and decoded
+/// on a blocking thread. Without an audio cache, or when the key cannot be
+/// had, the picture fills in from playback alone.
+async fn complete_seek_wave(
+    wave: Arc<crate::seekwave::SeekWave>,
+    generation: u64,
+    item: AudioItem,
+    eq: crate::eq::SharedEq,
+) {
+    let Ok(track_id) = SpotifyId::try_from(&item.track_id) else {
+        return;
+    };
+    let started = Instant::now();
+    let give_up =
+        started + Duration::from_millis(u64::from(item.duration_ms)) + Duration::from_secs(60);
+    let mut last_size = None;
+    let (session, format, file_id, path) = loop {
+        if !wave.wants(generation) || Instant::now() > give_up {
+            return;
+        }
+        let Some(session) = wave.session().filter(|session| !session.is_invalid()) else {
+            return;
+        };
+        let Some(cache) = session.cache() else {
+            return;
+        };
+        let mut found = None;
+        for (&format, &file_id) in item.files.iter() {
+            let Some(path) = cache.file_path(file_id) else {
+                // No audio cache: playback alone fills the picture.
+                return;
+            };
+            if let Ok(meta) = std::fs::metadata(&path) {
+                found = Some((format, file_id, path, meta.len()));
+                break;
+            }
+        }
+        if let Some((format, file_id, path, size)) = found {
+            // librespot writes the file in place once it has it all: the
+            // same size twice running means the write is done.
+            let settled = last_size == Some(size) && started.elapsed() >= SEEK_WAVE_SETTLE;
+            if settled && !session.audio_key().is_backing_off() {
+                break (session, format, file_id, path);
+            }
+            last_size = Some(size);
+        }
+        tokio::time::sleep(SEEK_WAVE_POLL).await;
+    };
+    let key = match session.audio_key().request(track_id, file_id).await {
+        Ok(key) => key,
+        Err(error) => {
+            log::debug!("waveform left to playback, no key: {error}");
+            return;
+        }
+    };
+    drop(session);
+    let duration_ms = item.duration_ms;
+    let decoded = tokio::task::spawn_blocking(move || {
+        decode_seek_wave(&path, Some(key), format, duration_ms, eq)
+    })
+    .await;
+    match decoded {
+        Ok(Some(values)) => wave.install(generation, values, true),
+        Ok(None) => log::debug!("waveform left to playback, file unreadable"),
+        Err(error) => log::debug!("waveform decode failed: {error}"),
+    }
+}
+
+/// The levels of the cached, encrypted file at `path`, through the same
+/// equalizer the player uses.
+fn decode_seek_wave(
+    path: &std::path::Path,
+    key: Option<librespot_core::audio_key::AudioKey>,
+    format: librespot_metadata::audio::AudioFileFormat,
+    duration_ms: u32,
+    eq: crate::eq::SharedEq,
+) -> Option<Vec<u8>> {
+    use librespot_metadata::audio::AudioFiles;
+    use librespot_playback::decoder::{AudioDecoder, AudioPacket, SymphoniaDecoder};
+    use symphonia::core::probe::Hint;
+    /// The header Spotify puts in front of its Ogg files.
+    const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
+
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let offset = if AudioFiles::is_ogg_vorbis(format) {
+        SPOTIFY_OGG_HEADER_END
+    } else {
+        0
+    };
+    let source =
+        crate::seekwave::Offset::new(librespot_audio::AudioDecrypt::new(key, file), offset, len)
+            .ok()?;
+    let mut hint = Hint::new();
+    if let Some(mime) = AudioFiles::mime_type(format) {
+        hint.mime_type(mime);
+    }
+    let mut decoder = SymphoniaDecoder::new(source, hint).ok()?;
+    let mut eq = crate::eq::Processor::new(eq);
+    let expected = u64::from(duration_ms) * u64::from(librespot_playback::SAMPLE_RATE) / 1_000;
+    let mut builder = crate::seekwave::Builder::new(expected);
+    let mut frame = 0;
+    while let Ok(Some((_, packet))) = decoder.next_packet() {
+        if let AudioPacket::Samples(mut samples) = packet {
+            eq.process(&mut samples);
+            frame = builder.add(frame, &samples, 1.0, true);
+        }
+    }
+    // A file that stops short decodes only part of the song; leave the
+    // rest to playback rather than stretch what was read over it.
+    (frame >= expected * 9 / 10)
+        .then(|| builder.finish())
+        .flatten()
 }
 
 fn set<T: PartialEq>(target: &mut T, value: T) -> bool {
@@ -2197,5 +2379,39 @@ mod tests {
             "/color-lyrics/v2/track/4uLU6hMCjMI75M1A2tKUQC\
              ?format=json&vocalRemoval=false&market=from_token"
         );
+    }
+}
+
+#[cfg(test)]
+mod seek_wave_tests {
+    /// Decodes an Ogg Vorbis file behind Spotify's 0xa7-byte header, as
+    /// the waveform seek bar reads a cached song, and reports the time it
+    /// took. Run with `SPOTIFAST_WAVE_OGG=<file.ogg>` and `--ignored`.
+    #[test]
+    #[ignore = "needs an Ogg Vorbis file"]
+    fn a_cached_song_decodes_to_a_whole_waveform() {
+        let ogg = std::env::var("SPOTIFAST_WAVE_OGG").expect("SPOTIFAST_WAVE_OGG");
+        let mut bytes = vec![0; 0xa7];
+        bytes.extend(std::fs::read(&ogg).unwrap());
+        let path = std::env::temp_dir().join(format!("spotifast-wave-{}.ogg", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let duration_ms: u32 = std::env::var("SPOTIFAST_WAVE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(240_000);
+        let started = std::time::Instant::now();
+        let values = super::decode_seek_wave(
+            &path,
+            None,
+            librespot_metadata::audio::AudioFileFormat::OGG_VORBIS_320,
+            duration_ms,
+            crate::eq::shared(),
+        );
+        let took = started.elapsed();
+        let _ = std::fs::remove_file(&path);
+        let values = values.expect("decoded");
+        assert_eq!(values.len(), crate::seekwave::BUCKETS);
+        assert!(values.iter().any(|&value| value > 0));
+        println!("decoded {duration_ms} ms of sound in {took:?}");
     }
 }

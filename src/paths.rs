@@ -213,6 +213,11 @@ impl AppDirs {
         self.cache.join("lyrics")
     }
 
+    /// The waveform seek bar's pictures, about a kilobyte per song.
+    pub fn waveform_cache_dir(&self) -> PathBuf {
+        self.cache.join("waveforms")
+    }
+
     pub fn playlist_cache_dir(&self) -> PathBuf {
         self.cache.join("playlists")
     }

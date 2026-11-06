@@ -3069,7 +3069,47 @@ pub fn thin_slider(
     width: f32,
     wheel_step: Option<f32>,
 ) -> SliderEvent {
-    let (_, rect) = ui.allocate_space(vec2(width, 16.0));
+    painted_slider(
+        ui,
+        id,
+        label,
+        value,
+        vec2(width, 16.0),
+        wheel_step,
+        |painter, rect, shown, active| {
+            let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
+            let track_color = if palette.dark {
+                Color32::from_white_alpha(50)
+            } else {
+                Color32::from_black_alpha(40)
+            };
+            painter.rect_filled(bar, 2.0, track_color);
+            let filled = Rect::from_min_max(
+                bar.min,
+                pos2(bar.left() + bar.width() * shown.clamp(0.0, 1.0), bar.max.y),
+            );
+            let fill = if active { palette.accent } else { palette.text };
+            painter.rect_filled(filled, 2.0, fill);
+            if active {
+                painter.circle_filled(pos2(filled.right(), bar.center().y), 6.0, palette.text);
+            }
+        },
+    )
+}
+
+/// [`thin_slider`]'s behaviour, `size` large, drawn by `paint` with the
+/// slider's rect, the value it shows and whether it is hovered, focused or
+/// dragged.
+pub fn painted_slider(
+    ui: &mut Ui,
+    id: egui::Id,
+    label: &str,
+    value: f32,
+    size: Vec2,
+    wheel_step: Option<f32>,
+    paint: impl FnOnce(&egui::Painter, Rect, f32, bool),
+) -> SliderEvent {
+    let (_, rect) = ui.allocate_space(size);
     let response = ui.interact(rect, id, Sense::click_and_drag());
     let dragging_value = ui.data(|data| data.get_temp::<f32>(id));
     let pointer_value = response
@@ -3161,23 +3201,7 @@ pub fn thin_slider(
             || response.has_focus()
             || response.dragged()
             || dragging_value.is_some();
-        let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
-        let track_color = if palette.dark {
-            Color32::from_white_alpha(50)
-        } else {
-            Color32::from_black_alpha(40)
-        };
-        ui.painter().rect_filled(bar, 2.0, track_color);
-        let filled = Rect::from_min_max(
-            bar.min,
-            pos2(bar.left() + bar.width() * shown.clamp(0.0, 1.0), bar.max.y),
-        );
-        let fill = if active { palette.accent } else { palette.text };
-        ui.painter().rect_filled(filled, 2.0, fill);
-        if active {
-            ui.painter()
-                .circle_filled(pos2(filled.right(), bar.center().y), 6.0, palette.text);
-        }
+        paint(ui.painter(), rect, shown, active);
     }
     event
 }

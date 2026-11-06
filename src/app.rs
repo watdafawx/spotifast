@@ -735,6 +735,8 @@ pub struct App {
     /// has asked about.
     remote_pushed_at: Option<Instant>,
     pub seek_preview: Option<f32>,
+    /// What the waveform seek bar last copied of the playing song.
+    pub seek_wave_view: crate::seekwave::View,
     pub volume_preview: Option<f32>,
     /// The main window's size, position and maximized state: from the
     /// session file, followed in each logic pass while that window is open,
@@ -1146,6 +1148,8 @@ impl App {
         settings.proxy_password_legacy |= dirs.proxy_secret_file().try_exists().unwrap_or(true);
         let plays = crate::history::History::load(&dirs.history_file());
         let tap = crate::vis::AudioTap::new();
+        tap.seek_wave.set_dir(dirs.waveform_cache_dir());
+        tap.seek_wave.set_enabled(settings.seek_waveform);
         let eq = crate::eq::shared();
         if let Ok(mut shared) = eq.lock() {
             *shared = eq_settings(&settings);
@@ -1437,6 +1441,7 @@ impl App {
             remote_recheck_at: None,
             remote_pushed_at: None,
             seek_preview: None,
+            seek_wave_view: crate::seekwave::View::default(),
             volume_preview: None,
             window_geometry: fastframe_shell::window::Geometry {
                 size: crate::window::usable_size(session.window_size),

@@ -27,6 +27,7 @@ Spotifast follows each platform's conventions. On Linux:
 | Audio cache | `~/.cache/spotifast/audio/` | Always |
 | Artwork cache | `~/.cache/spotifast/art/` | Always |
 | Lyrics cache | `~/.cache/spotifast/lyrics/` | Always |
+| Waveform seek bar cache, about 1 KB a song | `~/.cache/spotifast/waveforms/` | Always |
 | Skin previews | `~/.cache/spotifast/skin-previews/` | Always, they are drawn again |
 | Account-scoped playlist page cache | `~/.cache/spotifast/playlists/<account-id>/` | Always |
 | Account-scoped playlist list | `~/.cache/spotifast/library/` | Always |
@@ -388,6 +389,7 @@ main fields are:
 | `accent_from_art` | `true` | Tint pages with album art, and colour the player bar visualizer with the cover's colours |
 | `player_bar_vis` | `off` | Since 0.11.0: what moves behind the player bar while a song plays on this computer: `off`, `spectrum` or `waveform` |
 | `player_bar_vis_click` | `true` | Allow clicks on empty player bar space to cycle visualizer modes |
+| `seek_waveform` | `false` | Draw the seek bar as the song's waveform. It is worked out on this computer from the sound after the equalizer and before the volume: filled in while a song plays here, and completed from librespot's audio cache once the whole file is there (one extra audio key request for a song played at least five seconds). Each finished song is kept in the waveform cache |
 | `visualizer_fps` | `60` | Frame rate of the player bar and mini player visualizers; `0` is uncapped. Half that out of focus, at most 30 while the system saves energy, none while the window is hidden. MilkDrop uses `milkdrop_fps` |
 | `library_sort` | `{}` | Per-section Library order overrides, since 0.8.0: `library`, `recently_played`, `name`, `recently_added`, `local`, or `spotify`, where supported |
 | `library_by_you` | `false` | Show only playlists owned by the signed-in account, alongside Liked Songs; applies only to the Playlists shelf |
@@ -476,7 +478,7 @@ and `--demo-show` adds surfaces on top of it: a comma separated list of
 `focus`, `winamp`, `playlist`, `eq`, `eq-shade`, `compact`, `update`, `personal-app`, `slow-banner`, `audio-key-banner`,
 `collection-loading`, `shuffle-selected`, `shuffle-started`, `library-list`,
 `library-list-narrow`, `library-list-wide`, `library-grid`, `library-grid-narrow`,
-`library-grid-wide`, `eq-user-presets`, `start-in-tray`, `rtl`, `player-bar-spectrum`, `player-bar-waveform`,
+`library-grid-wide`, `eq-user-presets`, `start-in-tray`, `rtl`, `player-bar-spectrum`, `player-bar-waveform`, `seek-waveform`, `seek-waveform-filling`,
 `lyrics-fullscreen-view`, `lyrics-fullscreen-instrumental`, `signed-out`, `connecting`,
 `waiting-for-browser`, `sign-in-returning`, `sign-in-malformed`, `sign-in-shared-retired`,
 `sign-in-unknown-client`, `sign-in-not-allowed`, `shared-grant`, and `own-app`. The Library variants show the list or cover grid with
@@ -503,6 +505,8 @@ explicit `--demo-data` directory, its `config/settings.json` and
 `config/themes` supply them.
 `player-bar-spectrum` and `player-bar-waveform` play a fixed, music-like
 sound on this computer with that player bar visualizer on.
+`seek-waveform` shows the waveform seek bar for a song heard before, and
+`seek-waveform-filling` for one whose first part has played.
 `lyrics-fullscreen-view` and `lyrics-fullscreen-instrumental` draw full-screen
 lyrics, with words or without, at the window's own size.
 `eq-user-presets` saves a sample equalizer preset and puts it in use.

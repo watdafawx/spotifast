@@ -47,8 +47,9 @@ Spotify sends a `Retry-After` response.
 listeners.
 
 Spotify also limits apps created since November 2024. These apps cannot access
-Spotify-owned playlists, related artists, recommendations, or audio features.
-This is why the personal app cannot handle every request. Complete playlist
+Spotify-owned playlists, related artists, recommendations, or audio features
+(so the waveform seek bar is worked out on this computer from the decoded
+sound, not from Spotify's audio analysis). This is why the personal app cannot handle every request. Complete playlist
 library views come from the librespot session's rootlist while local playback
 is signed in, and from a shared grant made before 0.14.2 while one is still
 signed in. Playlists other people own, and every playlist when there is no

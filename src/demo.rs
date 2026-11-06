@@ -999,6 +999,32 @@ fn play_here(app: &mut App) {
     app.local.position_ms = now.as_ref().map_or(0, |now| now.position_ms);
 }
 
+/// A song's loudness for the waveform seek bar, the same every time: a
+/// quiet intro, verses and louder choruses with a breakdown between, and a
+/// fade at the end, with a beat's ripple through it all.
+pub fn demo_seek_levels() -> Vec<u8> {
+    let steps = crate::seekwave::BUCKETS;
+    (0..steps)
+        .map(|step| {
+            let at = step as f32 / steps as f32;
+            let section = match at {
+                a if a < 0.08 => 0.18 + a * 4.0,
+                a if a < 0.30 => 0.55,
+                a if a < 0.45 => 0.9,
+                a if a < 0.52 => 0.3,
+                a if a < 0.70 => 0.6,
+                a if a < 0.90 => 0.95,
+                a => 0.95 * (1.0 - (a - 0.9) * 9.0),
+            };
+            let ripple = 0.82 + 0.18 * ((step * 7919 % 97) as f32 / 97.0);
+            let beat = if step % 4 == 0 { 1.0 } else { 0.86 };
+            let rms: f32 = (section * ripple * beat).clamp(0.0, 1.0);
+            // Stored as the square root of the level, as the cache keeps it.
+            (rms.sqrt() * 255.0).round() as u8
+        })
+        .collect()
+}
+
 /// Half a second of stereo sound shaped like a busy mix, the same every
 /// time: a bass line, chords and their overtones at uneven levels up
 /// through the mids and highs, a bright hi-hat hiss and pink noise
@@ -1394,6 +1420,24 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 // visualizer draws in them.
                 if let Some(now) = app.now_playing() {
                     app.tint_for(now.art_small.or(now.art_url).as_deref());
+                }
+            }
+            // The waveform seek bar, whole for a song heard before, and
+            // part way through filling in on a first play.
+            "seek-waveform" | "seek-waveform-filling" => {
+                app.settings.seek_waveform = true;
+                play_here(app);
+                app.local.playback = crate::player::Playback::Paused;
+                if let Some(track) = &app.local.track {
+                    let duration = track.duration_ms;
+                    app.local.position_ms = duration * 38 / 100;
+                    let levels = demo_seek_levels();
+                    let known = if surface == "seek-waveform" {
+                        levels.len()
+                    } else {
+                        levels.len() * 45 / 100
+                    };
+                    app.winamp.tap.seek_wave.demo(&track.uri, &levels, known);
                 }
             }
             // The sign-in card and the card while the session connects.
@@ -6695,6 +6739,95 @@ mod tests {
             "{:?}",
             app.actions
         );
+        app.backend.shutdown();
+    }
+
+    /// The waveform seek bar draws a bar for each few points of the song,
+    /// fewer while only part has been heard, and seeks as the plain bar does.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn the_waveform_seek_bar_draws_the_song_and_seeks() {
+        let (ctx, mut app) = accessible_app("seek-waveform");
+        let draw = |app: &mut App, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| crate::ui::player_bar::show(app, ui),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        // The bars are one untextured mesh of a rectangle each; the bars
+        // still unheard sit at the floor, as tall as each other.
+        let bar_heights = |output: &egui::FullOutput| -> Vec<f32> {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Mesh(mesh)
+                        if mesh.texture_id == egui::TextureId::default()
+                            && mesh.vertices.len() >= 400 =>
+                    {
+                        Some(
+                            mesh.vertices
+                                .chunks_exact(4)
+                                .map(|quad| quad[2].pos.y - quad[0].pos.y)
+                                .collect(),
+                        )
+                    }
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_default()
+        };
+
+        // #given a song heard before
+        apply_flags(&mut app, None, Some("seek-waveform"));
+        draw(&mut app, vec![]);
+        let whole = bar_heights(&draw(&mut app, vec![]));
+        assert!(whole.len() > 100, "{} bars", whole.len());
+        let quietest = whole.iter().copied().fold(f32::MAX, f32::min);
+        let tallest = whole.iter().copied().fold(0.0, f32::max);
+        assert!(tallest > quietest * 1.5, "the loud parts stand out");
+        // The floor every unheard step is drawn at.
+        let floor = tallest * crate::seekwave::FLOOR + 0.01;
+        assert!(whole.iter().all(|&height| height > floor), "{whole:?}");
+
+        // #when only its first part has been heard
+        apply_flags(&mut app, None, Some("seek-waveform-filling"));
+        let filling = bar_heights(&draw(&mut app, vec![]));
+        assert_eq!(filling.len(), whole.len());
+        let ahead = filling[filling.len() * 3 / 4];
+        assert!(ahead <= floor, "unheard is flat: {ahead}");
+        assert!(filling[filling.len() / 3] > floor * 2.0, "heard is drawn");
+
+        // #when its middle is clicked
+        app.actions.clear();
+        let middle = egui::pos2(640.0, 800.0 - crate::theme::PLAYER_BAR_HEIGHT / 2.0 + 23.0);
+        draw(
+            &mut app,
+            pointer_click(middle, egui::PointerButton::Primary),
+        );
+        let duration = app.local.track.as_ref().unwrap().duration_ms;
+        let seek = app.actions.iter().find_map(|action| match action {
+            Action::Seek(position) => Some(*position),
+            _ => None,
+        });
+        let seek = seek.expect("a click seeks");
+        assert!(
+            seek.abs_diff(duration / 2) < duration / 50,
+            "{seek} of {duration}"
+        );
+
+        // #when the setting is off the plain bar is back
+        app.settings.seek_waveform = false;
+        assert!(bar_heights(&draw(&mut app, vec![])).is_empty());
         app.backend.shutdown();
     }
 

@@ -50,6 +50,7 @@ pub mod playlist_cover;
 pub mod power;
 pub mod prerelease;
 pub mod resample;
+pub mod seekwave;
 pub mod session_reads;
 pub mod settings;
 pub mod single_instance;

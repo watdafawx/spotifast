@@ -9,7 +9,7 @@ use crate::player::RepeatMode;
 use crate::theme::{self, Icon};
 use crate::util;
 
-use super::widgets::{SliderEvent, thin_slider};
+use super::widgets::{SliderEvent, painted_slider, thin_slider};
 
 /// How much of the playing art's tint the bar's fill carries.
 const TINT_STRENGTH: f32 = 0.12;
@@ -37,6 +37,14 @@ const WAVE_ECHO_ALPHA: f32 = 0.18;
 const LIGHT_STRENGTH: f32 = 1.5;
 /// The gap between spectrum bars.
 const SPECTRUM_GAP: f32 = 2.0;
+/// The waveform seek bar: its height, and each mirrored bar's width and the
+/// gap after it.
+const WAVE_SEEK_HEIGHT: f32 = 26.0;
+const WAVE_SEEK_BAR: f32 = 2.0;
+const WAVE_SEEK_GAP: f32 = 1.0;
+/// How strongly the part still to play shows, and steps not yet heard.
+const WAVE_SEEK_AHEAD_ALPHA: f32 = 0.32;
+const WAVE_SEEK_UNKNOWN_ALPHA: f32 = 0.16;
 
 /// Forget this bar's animation session while the sign-in screen is shown.
 pub(crate) fn end_tint_session(ctx: &egui::Context) {
@@ -387,6 +395,65 @@ fn waveform(
     stroke(-0.6, 1.0, WAVE_ECHO_ALPHA);
     for (width, alpha) in WAVE_LAYERS {
         stroke(1.0, width, alpha);
+    }
+}
+
+/// The seek bar as the song's waveform: thin bars mirrored about the
+/// middle, as tall as the song is loud there, bright up to `shown` and
+/// grey after it. Steps not yet heard stay at the floor, dimmer still.
+/// Hovered or dragged, a playhead in the accent marks the position.
+fn seek_waveform(
+    painter: &egui::Painter,
+    rect: Rect,
+    shown: f32,
+    active: bool,
+    levels: Option<&crate::seekwave::Levels>,
+    palette: &theme::Palette,
+) {
+    let pitch = WAVE_SEEK_BAR + WAVE_SEEK_GAP;
+    let bars = ((rect.width() + WAVE_SEEK_GAP) / pitch).floor().max(1.0) as usize;
+    let heights = levels.map_or_else(
+        || vec![None; bars],
+        |levels| crate::seekwave::bar_heights(levels, bars),
+    );
+    let bright = if palette.dark {
+        Color32::WHITE
+    } else {
+        palette.text
+    };
+    let head = rect.left() + rect.width() * shown.clamp(0.0, 1.0);
+    let mut mesh = egui::Mesh::default();
+    for (index, height) in heights.iter().enumerate() {
+        let left = rect.left() + index as f32 * pitch;
+        let played = left + WAVE_SEEK_BAR / 2.0 <= head;
+        let (height, colour) = match height {
+            Some(height) => (
+                *height,
+                if played {
+                    bright
+                } else {
+                    bright.gamma_multiply(WAVE_SEEK_AHEAD_ALPHA)
+                },
+            ),
+            None => (
+                crate::seekwave::FLOOR,
+                bright.gamma_multiply(if played {
+                    WAVE_SEEK_AHEAD_ALPHA
+                } else {
+                    WAVE_SEEK_UNKNOWN_ALPHA
+                }),
+            ),
+        };
+        let half = (height * rect.height() / 2.0).max(1.0);
+        let bar = Rect::from_min_max(
+            pos2(left, rect.center().y - half),
+            pos2(left + WAVE_SEEK_BAR, rect.center().y + half),
+        );
+        mesh.add_colored_rect(bar, colour);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    if active {
+        painter.vline(head, rect.y_range(), egui::Stroke::new(2.0, palette.accent));
     }
 }
 
@@ -906,8 +973,13 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
         theme::regular(11.5),
         time_color,
     );
-    let slider_rect =
-        Rect::from_center_size(pos2(region.center().x, row_cy), vec2(slider_width, 16.0));
+    let waveform = app.settings.seek_waveform;
+    app.winamp.tap.seek_wave.set_enabled(waveform);
+    let slider_height = if waveform { WAVE_SEEK_HEIGHT } else { 16.0 };
+    let slider_rect = Rect::from_center_size(
+        pos2(region.center().x, row_cy),
+        vec2(slider_width, slider_height),
+    );
     let mut slider_ui = ui.new_child(
         UiBuilder::new()
             .max_rect(slider_rect)
@@ -918,15 +990,38 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     } else {
         0.0
     };
-    match thin_slider(
-        &mut slider_ui,
-        &palette,
-        egui::Id::new("seek-slider"),
-        &gettext(app.locale, "Playback position (%)"),
-        fraction,
-        slider_width,
-        None,
-    ) {
+    let seek_id = egui::Id::new("seek-slider");
+    let seek_label = gettext(app.locale, "Playback position (%)");
+    let event = if waveform {
+        let levels = now.and_then(|now| {
+            let wave = &app.winamp.tap.seek_wave;
+            wave.follow(&now.uri, now.duration_ms, now.position_ms);
+            wave.refresh(&now.uri, &mut app.seek_wave_view);
+            app.seek_wave_view.levels.as_ref()
+        });
+        painted_slider(
+            &mut slider_ui,
+            seek_id,
+            &seek_label,
+            fraction,
+            vec2(slider_width, slider_height),
+            None,
+            |painter, rect, shown, active| {
+                seek_waveform(painter, rect, shown, active, levels, &palette);
+            },
+        )
+    } else {
+        thin_slider(
+            &mut slider_ui,
+            &palette,
+            seek_id,
+            &seek_label,
+            fraction,
+            slider_width,
+            None,
+        )
+    };
+    match event {
         SliderEvent::Dragging(value) => app.seek_preview = Some(value),
         SliderEvent::Committed(value) => {
             app.seek_preview = None;

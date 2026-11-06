@@ -180,7 +180,7 @@ impl AudioControl {
         self.waiting_for_track.store(false, Ordering::SeqCst);
     }
 
-    fn waiting_for_track(&self) -> bool {
+    pub(crate) fn waiting_for_track(&self) -> bool {
         self.waiting_for_track.load(Ordering::SeqCst)
     }
 
