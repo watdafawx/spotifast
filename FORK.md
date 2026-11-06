@@ -77,6 +77,20 @@ the mod's files.
   Export leaves out, such as AI and lyrics providers.
 - Devtools: right-click → Inspect in the mods window
 
+## Native replacements for Spicetify extensions
+
+Spicetify extensions edit Spotify's own interface, so they cannot run in
+the mods webview. The fork rebuilds the ones worth keeping natively:
+
+- **Genres in the player bar.** A dim line under the playing song's artist
+  names shows up to three of its artists' genres, the first artist's first
+  (`App::playing_genres`). They come from the Web API's artist object, the
+  same one the artist page reads, fetched once per artist on the backend
+  (`ApiRequest::ArtistGenres`) and kept for the session; a failed request
+  is tried again after five minutes. Spotify lists no genres for many
+  artists, and then the line is hidden. Settings → Appearance → Genres in
+  player bar turns it off (`player_bar_genres`, on by default).
+
 ## Keeping up with upstream
 
 Everything fork-specific lives in new files: `src/mods/`, this file,

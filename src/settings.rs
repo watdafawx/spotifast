@@ -317,6 +317,9 @@ pub struct Settings {
     pub player_bar_vis: PlayerBarVis,
     /// Allow clicks on the player bar background to cycle visualizer modes.
     pub player_bar_vis_click: bool,
+    /// A dim line of the playing song's artists' genres under the artist
+    /// names in the player bar. Older files without it show the line.
+    pub player_bar_genres: bool,
     /// How many frames a second the player bar's visualizer and the mini
     /// player's analyser draw; 0 is uncapped. MilkDrop has its own.
     pub visualizer_fps: u32,
@@ -512,6 +515,7 @@ impl Default for Settings {
             accent_from_art: true,
             player_bar_vis: PlayerBarVis::Off,
             player_bar_vis_click: true,
+            player_bar_genres: true,
             visualizer_fps: crate::milkdrop::DEFAULT_FPS,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
             sidebar_visible: true,
@@ -1526,6 +1530,21 @@ mod tests {
             let restored: Settings = serde_json::from_value(json).unwrap();
             assert_eq!(restored.tray_icon, choice);
         }
+    }
+
+    #[test]
+    fn player_bar_genres_are_on_by_default_and_round_trip() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.player_bar_genres);
+        let older: Settings = serde_json::from_str(r#"{"player_bar_vis_click":false}"#).unwrap();
+        assert!(older.player_bar_genres);
+        let off = Settings {
+            player_bar_genres: false,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert!(!restored.player_bar_genres);
     }
 
     #[test]

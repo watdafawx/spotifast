@@ -417,6 +417,11 @@ fn eased_fill(ctx: &egui::Context, panel: Color32, tint: Option<Color32>) -> Col
     }
 }
 
+/// The genre line's font, a step below the artist names.
+fn genre_font() -> egui::FontId {
+    theme::regular(11.0)
+}
+
 fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option<&NowPlaying>) {
     let palette = app.palette;
     let cy = region.center().y;
@@ -508,6 +513,8 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
     let heart_width = if now.is_episode { 0.0 } else { 42.0 };
     let text_left = cover_rect.right() + 12.0;
     let text_width = (region.right() - text_left - heart_width).max(40.0);
+    // A dim third line of the artists' genres, when any are known. (mods)
+    let genres = app.playing_genres(now);
     let displayed_text_width: f32 = {
         let title =
             ui.painter()
@@ -517,9 +524,26 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
             theme::regular(12.0),
             palette.secondary,
         );
-        title.size().x.max(subtitle.size().x).min(text_width)
+        let genre_width = if genres.is_empty() {
+            0.0
+        } else {
+            ui.painter()
+                .layout_no_wrap(genres.clone(), genre_font(), palette.dim)
+                .size()
+                .x
+        };
+        title
+            .size()
+            .x
+            .max(subtitle.size().x)
+            .max(genre_width)
+            .min(text_width)
     };
-    let info_rect = Rect::from_min_size(pos2(text_left, cy - 18.0), vec2(text_width, 36.0));
+    let info_rect = if genres.is_empty() {
+        Rect::from_min_size(pos2(text_left, cy - 18.0), vec2(text_width, 36.0))
+    } else {
+        Rect::from_min_size(pos2(text_left, cy - 25.0), vec2(text_width, 50.0))
+    };
 
     let mut text_ui = ui.new_child(
         UiBuilder::new()
@@ -569,6 +593,11 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
             }
         }
     });
+    if !genres.is_empty() {
+        let response =
+            theme::text(&mut text_ui, &genres, genre_font(), palette.dim).interact(drag_sense);
+        responses.push(response);
+    }
     if responses
         .iter()
         .any(|response| response.drag_started_by(egui::PointerButton::Primary))

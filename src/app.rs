@@ -188,6 +188,31 @@ struct QueueShufflePending {
     at: Instant,
 }
 
+/// What is known of one artist's genres, for the player bar.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ArtistGenres {
+    Loading,
+    Known(Vec<String>),
+    /// The request failed then; it is asked again after [`GENRES_RETRY`].
+    Failed(Instant),
+}
+
+/// How long a failed genre request waits before the next try.
+const GENRES_RETRY: Duration = Duration::from_secs(300);
+
+/// "latin pop" as "Latin Pop": the first letter of each word in capitals.
+fn capitalise_words(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The playing item as the interface sees it, whichever device plays it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
@@ -589,6 +614,9 @@ pub struct App {
     load_generation: u64,
     pub album_pages: HashMap<String, AlbumPage>,
     pub artist_pages: HashMap<String, ArtistPage>,
+    /// Genres by artist id for the player bar's genre line. Kept across
+    /// account changes, since genres are the same for everyone.
+    pub artist_genres: HashMap<String, ArtistGenres>,
     /// Never reset on page eviction or account reset, so old replies cannot match.
     artist_top_tracks_generation: u64,
     pub show_pages: HashMap<String, ShowPage>,
@@ -1343,6 +1371,7 @@ impl App {
             load_generation: 0,
             album_pages: HashMap::new(),
             artist_pages: HashMap::new(),
+            artist_genres: HashMap::new(),
             artist_top_tracks_generation: 0,
             show_pages: HashMap::new(),
             radio_pages: HashMap::new(),
@@ -4455,6 +4484,60 @@ impl App {
         })));
     }
 
+    /// Asks for the genres of the playing song's artists that are not
+    /// known yet, for the player bar's genre line.
+    fn request_playing_genres(&mut self) {
+        if !self.settings.player_bar_genres || !self.network_reachable {
+            return;
+        }
+        let Some(now) = self.now_playing() else {
+            return;
+        };
+        if now.is_episode {
+            return;
+        }
+        for id in now.artists.iter().filter_map(|artist| artist.id.as_ref()) {
+            let due = match self.artist_genres.get(id) {
+                None => true,
+                Some(ArtistGenres::Failed(at)) => at.elapsed() >= GENRES_RETRY,
+                Some(_) => false,
+            };
+            if due {
+                self.artist_genres.insert(id.clone(), ArtistGenres::Loading);
+                self.backend
+                    .api(ApiRequest::ArtistGenres { id: id.clone() });
+            }
+        }
+    }
+
+    /// The player bar's genre line for the playing song: up to three of its
+    /// artists' genres, the first artist's first, each word capitalised.
+    /// Empty when the setting is off or no artist has genres.
+    pub fn playing_genres(&self, now: &NowPlaying) -> String {
+        if !self.settings.player_bar_genres || now.is_episode {
+            return String::new();
+        }
+        let mut genres: Vec<&str> = Vec::new();
+        for id in now.artists.iter().filter_map(|artist| artist.id.as_ref()) {
+            if let Some(ArtistGenres::Known(known)) = self.artist_genres.get(id) {
+                for genre in known {
+                    let genre = genre.trim();
+                    if !genre.is_empty()
+                        && !genres.iter().any(|seen| seen.eq_ignore_ascii_case(genre))
+                    {
+                        genres.push(genre);
+                    }
+                }
+            }
+        }
+        genres
+            .into_iter()
+            .take(3)
+            .map(capitalise_words)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Pushes the Winamp window's always-on-top level to the live window.
     fn push_winamp_level(&self, ctx: &egui::Context) {
         if self.window_level_supported
@@ -4560,6 +4643,7 @@ impl App {
         if self.is_connected() && !self.offline {
             self.request_resume_track();
             self.ensure_resume_context_loaded();
+            self.request_playing_genres();
         }
 
         // The spinner appears once background work outlasts the quiet
@@ -9513,8 +9597,19 @@ impl App {
                     Err(error) => self.search_failed(&gettext(self.locale, "Search"), error),
                 }
             }
+            ApiResponse::ArtistGenres { id, result } => {
+                self.artist_genres.insert(
+                    id,
+                    match result {
+                        Ok(genres) => ArtistGenres::Known(genres),
+                        Err(_) => ArtistGenres::Failed(Instant::now()),
+                    },
+                );
+            }
             ApiResponse::Artist { id, result } => {
                 if let Ok(artist) = &result {
+                    self.artist_genres
+                        .insert(id.clone(), ArtistGenres::Known(artist.genres.clone()));
                     if let Some(image) = pick_image(&artist.images, 64) {
                         self.tint_for(Some(image));
                     }
@@ -23784,6 +23879,66 @@ mod tests {
         );
         app.reveal_theme_changes = false;
         app
+    }
+
+    #[test]
+    fn playing_genres_are_asked_once_per_artist_and_retried_after_failure() {
+        let mut app = test_app("playing-genres");
+        app.backend.set_offline(true);
+        app.local = LocalState {
+            playback: Playback::Playing,
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:track:song".into(),
+                title: "Song".into(),
+                artists: vec![
+                    ArtistRef {
+                        id: Some("a".into()),
+                        name: "A".into(),
+                        uri: Some("spotify:artist:a".into()),
+                    },
+                    ArtistRef {
+                        id: Some("b".into()),
+                        name: "B".into(),
+                        uri: Some("spotify:artist:b".into()),
+                    },
+                ],
+                duration_ms: 200_000,
+                ..crate::player::LocalTrack::default()
+            }),
+            ..LocalState::default()
+        };
+
+        app.settings.player_bar_genres = false;
+        app.request_playing_genres();
+        assert!(app.artist_genres.is_empty());
+
+        app.settings.player_bar_genres = true;
+        app.request_playing_genres();
+        assert_eq!(app.artist_genres.get("a"), Some(&ArtistGenres::Loading));
+        assert_eq!(app.artist_genres.get("b"), Some(&ArtistGenres::Loading));
+
+        app.handle_api(ApiResponse::ArtistGenres {
+            id: "a".into(),
+            result: Ok(vec!["hip hop".into(), "pop rap".into()]),
+        });
+        app.handle_api(ApiResponse::ArtistGenres {
+            id: "b".into(),
+            result: Err(crate::api::ApiError::Network("down".into())),
+        });
+        let now = app.now_playing().unwrap();
+        assert_eq!(app.playing_genres(&now), "Hip Hop, Pop Rap");
+
+        // A fresh failure waits; an old one is asked again.
+        app.request_playing_genres();
+        assert!(matches!(app.artist_genres["b"], ArtistGenres::Failed(_)));
+        app.artist_genres.insert(
+            "b".into(),
+            ArtistGenres::Failed(Instant::now() - GENRES_RETRY),
+        );
+        app.request_playing_genres();
+        assert_eq!(app.artist_genres.get("b"), Some(&ArtistGenres::Loading));
+        assert!(matches!(app.artist_genres["a"], ArtistGenres::Known(_)));
+        app.backend.shutdown();
     }
 
     #[test]

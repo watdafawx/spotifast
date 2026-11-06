@@ -471,6 +471,13 @@ pub fn populate(app: &mut App) {
         .albums
         .insert(DiscographyFilter::All.groups().to_string(), albums);
     app.artist_pages.insert("art0".into(), artist_page);
+    // The player bar's genre line under the playing artist.
+    for index in 0..ARTISTS.len() {
+        app.artist_genres.insert(
+            format!("art{index}"),
+            crate::app::ArtistGenres::Known(artist(index).genres),
+        );
+    }
     app.saved.insert("spotify:artist:art0".into(), true);
 
     // Play counts for the album's songs and the artist's popular ones.
@@ -6173,6 +6180,94 @@ mod tests {
             matches!(app.actions.as_slice(), [Action::Open(Page::Artist(id))] if id == "short"),
             "{:?}",
             app.actions
+        );
+        app.backend.shutdown();
+    }
+
+    /// The player bar shows up to three of the playing artists' genres,
+    /// capitalised, under the artist names; none when Spotify has none or
+    /// the setting is off.
+    #[test]
+    fn the_player_bar_shows_the_playing_artists_genres() {
+        use crate::app::ArtistGenres;
+        use crate::player::{LocalState, LocalTrack, Playback};
+
+        let (ctx, mut app) = accessible_app("player-bar-genres");
+        app.local = LocalState {
+            playback: Playback::Playing,
+            track: Some(LocalTrack {
+                uri: "spotify:track:genres".into(),
+                title: "Song".into(),
+                artists: vec![
+                    ArtistRef {
+                        id: Some("lead".into()),
+                        name: "Lead".into(),
+                        uri: Some("spotify:artist:lead".into()),
+                    },
+                    ArtistRef {
+                        id: Some("guest".into()),
+                        name: "Guest".into(),
+                        uri: Some("spotify:artist:guest".into()),
+                    },
+                ],
+                duration_ms: 200_000,
+                ..LocalTrack::default()
+            }),
+            ..LocalState::default()
+        };
+        app.artist_genres.insert(
+            "lead".into(),
+            ArtistGenres::Known(vec!["pop".into(), "latin pop".into()]),
+        );
+        app.artist_genres.insert(
+            "guest".into(),
+            ArtistGenres::Known(vec![
+                "Latin Pop".into(),
+                "reggaeton".into(),
+                "urbano latino".into(),
+            ]),
+        );
+        let view = crate::ui::player_bar::show;
+        let shown = |ctx: &egui::Context, app: &mut App| {
+            view_frame(ctx, app, vec![], view);
+            view_frame(ctx, app, vec![], view)
+        };
+        let text = shown(&ctx, &mut app);
+        let line = text
+            .iter()
+            .find(|(label, _)| label == "Pop, Latin Pop, Reggaeton")
+            .unwrap_or_else(|| panic!("{text:?}"))
+            .1;
+        let artist = text.iter().find(|(label, _)| label == "Lead").unwrap().1;
+        assert!(line.top() >= artist.bottom() - 1.0, "{line:?} {artist:?}");
+
+        // Spotify returns no genres for many artists: no line at all.
+        app.artist_genres
+            .insert("lead".into(), ArtistGenres::Known(Vec::new()));
+        app.artist_genres
+            .insert("guest".into(), ArtistGenres::Loading);
+        let text = shown(&ctx, &mut app);
+        assert!(
+            !text
+                .iter()
+                .any(|(label, _)| label.contains("Pop") || label.contains("Reggaeton")),
+            "{text:?}"
+        );
+
+        app.artist_genres.insert(
+            "guest".into(),
+            ArtistGenres::Known(vec!["reggaeton".into()]),
+        );
+        assert!(
+            shown(&ctx, &mut app)
+                .iter()
+                .any(|(label, _)| label == "Reggaeton")
+        );
+        app.settings.player_bar_genres = false;
+        assert!(
+            !shown(&ctx, &mut app)
+                .iter()
+                .any(|(label, _)| label == "Reggaeton")
         );
         app.backend.shutdown();
     }

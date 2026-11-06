@@ -1241,6 +1241,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let show_custom_titlebar = cfg!(target_os = "linux") || app.windows_controls_visible();
     let player_bar_vis = gettext(locale, "Player bar visualizer");
     let player_bar_vis_click = gettext(locale, "Click player bar to change visualizer");
+    let player_bar_genres = gettext(locale, "Genres in player bar");
     // Follow system's own light and dark palettes. Omarchy's palette already
     // follows the desktop, so they are offered only without it.
     let show_pair = app.settings.custom_theme.is_none()
@@ -1356,6 +1357,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ),
         pair_row(fastframe_theme::Base::Light),
         pair_row(fastframe_theme::Base::Dark),
+        RowText::new(
+            player_bar_genres.clone(),
+            gettext(
+                locale,
+                "Show the playing song's genres under the artist names.",
+            ),
+        ),
     ];
     for index in [8, 9, 10] {
         appearance_rows[index].available &= visualizers;
@@ -1585,6 +1593,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         app.settings.visualizer_fps,
                     ) {
                         app.settings.visualizer_fps = rate;
+                        changed = true;
+                    }
+                },
+            );
+            filtered_row(
+                ui,
+                &palette,
+                &needle,
+                &appearance,
+                &appearance_rows[13],
+                |ui| {
+                    if widgets::switch(
+                        ui,
+                        &palette,
+                        &player_bar_genres,
+                        &mut app.settings.player_bar_genres,
+                    )
+                    .changed()
+                    {
                         changed = true;
                     }
                 },

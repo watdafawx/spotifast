@@ -328,6 +328,10 @@ pub enum ApiRequest {
     RelatedArtists {
         id: String,
     },
+    /// An artist's genres for the player bar's genre line.
+    ArtistGenres {
+        id: String,
+    },
     Album {
         id: String,
     },
@@ -411,6 +415,7 @@ impl ApiRequest {
                 | Self::MyPlaylists { .. }
                 | Self::PlaylistSample { .. }
                 | Self::Contains { .. }
+                | Self::ArtistGenres { .. }
         )
     }
 }
@@ -593,6 +598,10 @@ pub enum ApiResponse {
     RelatedArtists {
         id: String,
         result: ApiResult<Vec<Artist>>,
+    },
+    ArtistGenres {
+        id: String,
+        result: ApiResult<Vec<String>>,
     },
     Album {
         id: String,
@@ -5138,6 +5147,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::RelatedArtists { .. } => Operation::RelatedArtists,
         ApiRequest::Recommendations { .. } => Operation::UnsupportedDevelopmentMode,
         ApiRequest::Artist { .. }
+        | ApiRequest::ArtistGenres { .. }
         | ApiRequest::ArtistAlbums { .. }
         | ApiRequest::Album { .. }
         | ApiRequest::AlbumTracks { .. }
@@ -5887,6 +5897,10 @@ async fn handle(
         },
         ApiRequest::Artist { id } => ApiResponse::Artist {
             result: routed!(artist(&id)),
+            id,
+        },
+        ApiRequest::ArtistGenres { id } => ApiResponse::ArtistGenres {
+            result: routed!(artist(&id)).map(|artist| artist.genres),
             id,
         },
         ApiRequest::ArtistTopTracks { id, generation } => ApiResponse::ArtistTopTracks {
