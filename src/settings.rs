@@ -477,6 +477,9 @@ pub struct Settings {
     /// succeeds. This flag is only in memory and is never persisted.
     #[serde(skip)]
     pub proxy_password_legacy: bool,
+    /// Fork: pronunciation and translation under the lyrics. The keys are
+    /// in the credential store, never here.
+    pub lyrics_ai: crate::lyrics_ai::AiSettings,
 }
 
 impl std::fmt::Debug for Settings {
@@ -590,6 +593,7 @@ impl Default for Settings {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_password_legacy: false,
+            lyrics_ai: crate::lyrics_ai::AiSettings::default(),
         }
     }
 }

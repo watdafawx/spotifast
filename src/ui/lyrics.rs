@@ -229,6 +229,8 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 );
             }
             ui.add_space(12.0);
+            // Fork: why the translation is missing, if it is.
+            super::lyrics_ai::notice(app, ui, palette.secondary);
             for (index, line) in lyrics.lines.iter().enumerate() {
                 let is_active = active == Some(index);
                 let lit = ui.ctx().animate_bool_with_time(
@@ -271,7 +273,9 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     )
                 };
                 crate::autoscroll::row(ui, &response);
-                let rect = response.rect;
+                // Fork: pronunciation and translation under the line.
+                let rect = super::lyrics_ai::under_line(app, ui, index, 14.0, color)
+                    .map_or(response.rect, |extra| response.rect.union(extra));
                 if lyrics.synced
                     && response.clicked()
                     && let Some(at_ms) = line.at_ms
@@ -924,6 +928,8 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 (12.0, 60.0)
             };
             ui.add_space(padding);
+            // Fork: why the translation is missing, if it is.
+            super::lyrics_ai::notice(app, ui, palette.text.gamma_multiply(0.6));
             for (index, line) in lyrics.lines.iter().enumerate() {
                 let is_active = active == Some(index);
                 let lit = ui.ctx().animate_bool_with_time(
@@ -958,13 +964,22 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 let edge = ((center - viewport.top()).min(viewport.bottom() - center)
                     / (size * 2.0))
                     .clamp(0.0, 1.0);
-                let response = ui
+                let (response, extra) = ui
                     .scope(|ui| {
                         ui.multiply_opacity(edge * edge * (3.0 - 2.0 * edge));
-                        ui.add(egui::Label::new(galley).sense(sense))
+                        let response = ui.add(egui::Label::new(galley).sense(sense));
+                        // Fork: pronunciation and translation under the line.
+                        let extra = super::lyrics_ai::under_line(
+                            app,
+                            ui,
+                            index,
+                            (size * 0.5).max(15.0),
+                            color,
+                        );
+                        (response, extra)
                     })
                     .inner;
-                let rect = response.rect;
+                let rect = extra.map_or(response.rect, |extra| response.rect.union(extra));
                 if lyrics.synced
                     && response.clicked()
                     && let Some(at_ms) = line.at_ms

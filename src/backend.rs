@@ -722,6 +722,21 @@ pub enum Command {
         update: crate::soloist::Update,
     },
     OpenThemesFolder,
+    /// Fork: pronunciation and translation lines for a song's lyrics
+    /// (src/lyrics_ai.rs).
+    LyricsExtras(Box<crate::lyrics_ai::Request>),
+    /// Fork: read which AI keys are saved, for the settings page.
+    LoadAiKeys,
+    /// Fork: save a provider's AI key; an empty key removes it.
+    SetAiKey {
+        provider: crate::lyrics_ai::Provider,
+        key: crate::lyrics_ai::SecretKey,
+    },
+    /// Internal: the AI keys were read from the credential store.
+    AiKeysLoaded {
+        lease: CredentialLease,
+        result: Result<crate::credentials::Loaded, crate::credentials::Error>,
+    },
     /// Fork: a Spotify request from a mod (src/mods/proxy.rs).
     #[cfg(feature = "mods")]
     Mods(Box<crate::mods::proxy::Request>),
@@ -1004,6 +1019,13 @@ pub enum Event {
         folder: std::path::PathBuf,
         uris: Arc<std::collections::HashMap<String, std::path::PathBuf>>,
     },
+    /// Fork: the extra lines for the lyrics request with this id.
+    LyricsExtras {
+        id: String,
+        result: Result<crate::lyrics_ai::Extras, crate::lyrics_ai::Error>,
+    },
+    /// Fork: which AI keys are saved, or why storing one failed.
+    AiKeys(Result<crate::lyrics_ai::KeysPresent, String>),
     ProxyRestored {
         config: ProxyConfig,
         password: Option<crate::credentials::ProxyPassword>,
@@ -1951,6 +1973,14 @@ struct Worker {
     /// The user asked to set up playback and the saved grant is being tried
     /// first. Only Spotify rejecting it opens the browser.
     authorize_if_rejected: bool,
+    /// Fork: the AI keys, once read from the credential store.
+    ai_keys: Option<crate::lyrics_ai::Keys>,
+    /// Fork: whether the AI keys are being read.
+    ai_keys_loading: bool,
+    /// Fork: extra-line requests waiting for the AI keys.
+    ai_waiting: Vec<crate::lyrics_ai::Request>,
+    /// Fork: keys typed before the saved ones were read, applied after.
+    ai_key_edits: Vec<(crate::lyrics_ai::Provider, crate::lyrics_ai::SecretKey)>,
 }
 
 /// A failed Connect probe setup must still reconcile departed provisional rows.
@@ -2050,6 +2080,10 @@ impl Worker {
             engine_retry_generation: 0,
             engine_retry_quiet: false,
             authorize_if_rejected: false,
+            ai_keys: None,
+            ai_keys_loading: false,
+            ai_waiting: Vec::new(),
+            ai_key_edits: Vec::new(),
         }
     }
 
@@ -2749,6 +2783,10 @@ impl Worker {
                     });
                 }
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
+                Command::LyricsExtras(request) => self.fetch_lyrics_extras(*request),
+                Command::LoadAiKeys => self.load_ai_keys(),
+                Command::SetAiKey { provider, key } => self.set_ai_key(provider, key),
+                Command::AiKeysLoaded { lease, result } => self.on_ai_keys_loaded(lease, result),
                 #[cfg(feature = "mods")]
                 Command::Mods(request) => {
                     let (engine, api) = (self.engine.clone(), self.api.clone());
@@ -3107,7 +3145,8 @@ impl Worker {
                     }
                 }
             }
-            None | Some(StoredGrant::Proxy(_) | StoredGrant::Soloist(_)) => {}
+            None
+            | Some(StoredGrant::Proxy(_) | StoredGrant::Soloist(_) | StoredGrant::AiKeys(_)) => {}
         }
         if slot == CredentialSlot::Playback {
             self.start_prerelease();
@@ -4796,6 +4835,117 @@ impl Worker {
                 result,
             });
             waker.wake();
+        });
+    }
+
+    // ---- fork: lyrics extras (src/lyrics_ai.rs) ------------------------
+
+    fn fetch_lyrics_extras(&mut self, request: crate::lyrics_ai::Request) {
+        let Some(keys) = self.ai_keys.clone() else {
+            self.ai_waiting.push(request);
+            self.load_ai_keys();
+            return;
+        };
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let cache_dir = crate::lyrics_ai::cache_dir(&self.dirs.lyrics_cache_dir());
+        tokio::spawn(async move {
+            let id = request.id();
+            let result = match http {
+                Ok(http) => crate::lyrics_ai::fetch(&http, &cache_dir, &request, &keys).await,
+                Err(error) => Err(crate::lyrics_ai::Error::Failed(error)),
+            };
+            if let Err(crate::lyrics_ai::Error::Failed(error)) = &result {
+                log::warn!("lyrics extras unavailable: {error}");
+            }
+            let _ = events.send(Event::LyricsExtras { id, result });
+            waker.wake();
+        });
+    }
+
+    fn load_ai_keys(&mut self) {
+        if let Some(keys) = &self.ai_keys {
+            self.emit(Event::AiKeys(Ok(keys.present())));
+            return;
+        }
+        if std::mem::replace(&mut self.ai_keys_loading, true) {
+            return;
+        }
+        let lease = self.credentials.lease(CredentialSlot::AiKeys);
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = lease.load().await;
+            let _ = commands.send(Command::AiKeysLoaded { lease, result });
+        });
+    }
+
+    fn on_ai_keys_loaded(
+        &mut self,
+        lease: CredentialLease,
+        result: Result<crate::credentials::Loaded, crate::credentials::Error>,
+    ) {
+        if !lease.current() {
+            return;
+        }
+        self.ai_keys_loading = false;
+        let keys = match result {
+            Ok(loaded) => match loaded.grant {
+                Some(StoredGrant::AiKeys(keys)) => keys,
+                _ => crate::lyrics_ai::Keys::default(),
+            },
+            Err(error) => {
+                self.emit(Event::AiKeys(Err(error.to_string())));
+                crate::lyrics_ai::Keys::default()
+            }
+        };
+        self.emit(Event::AiKeys(Ok(keys.present())));
+        self.ai_keys = Some(keys);
+        for (provider, key) in std::mem::take(&mut self.ai_key_edits) {
+            self.set_ai_key(provider, key);
+        }
+        for request in std::mem::take(&mut self.ai_waiting) {
+            self.fetch_lyrics_extras(request);
+        }
+    }
+
+    fn set_ai_key(
+        &mut self,
+        provider: crate::lyrics_ai::Provider,
+        key: crate::lyrics_ai::SecretKey,
+    ) {
+        // The other provider's saved key must survive, so read the saved
+        // keys before changing one.
+        let Some(mut keys) = self.ai_keys.clone() else {
+            self.ai_key_edits.push((provider, key));
+            self.load_ai_keys();
+            return;
+        };
+        keys.set(provider, key.0.trim().to_string());
+        self.emit(Event::AiKeys(Ok(keys.present())));
+        let operation = if keys.is_empty() {
+            if let Err(error) = self.credentials.revoke(CredentialSlot::AiKeys) {
+                self.emit(Event::AiKeys(Err(error.to_string())));
+            }
+            self.credentials.lease(CredentialSlot::AiKeys).delete()
+        } else {
+            self.credentials.invalidate(CredentialSlot::AiKeys);
+            self.credentials
+                .lease(CredentialSlot::AiKeys)
+                .save(StoredGrant::AiKeys(keys.clone()))
+        };
+        self.ai_keys = Some(keys);
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            match operation.await {
+                Ok(()) | Err(crate::credentials::Error::Stale) => {}
+                Err(error) => {
+                    // Still usable for this session.
+                    let _ = events.send(Event::AiKeys(Err(error.to_string())));
+                    waker.wake();
+                }
+            }
         });
     }
 

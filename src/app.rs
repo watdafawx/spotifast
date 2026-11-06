@@ -714,6 +714,8 @@ pub struct App {
     /// the first line), so it moves once per change; `None` until it has
     /// positioned itself at all for this track.
     pub lyrics_line_shown: Option<Option<usize>>,
+    /// Fork: pronunciation and translation under the lyrics.
+    pub lyrics_ai: crate::lyrics_ai::State,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -1429,6 +1431,7 @@ impl App {
             lyrics: Loadable::NotLoaded,
             lyrics_following: true,
             lyrics_line_shown: None,
+            lyrics_ai: Default::default(),
             show_devices: false,
             toasts: Vec::new(),
             actions: Vec::new(),
@@ -3076,8 +3079,18 @@ impl App {
                             Ok(found) => Loadable::Loaded(found),
                             Err(error) => self.lyrics_failed(error, Instant::now()),
                         };
+                        self.request_lyrics_extras();
                     }
                 }
+                Event::LyricsExtras { id, result } => self.receive_lyrics_extras(&id, result),
+                Event::AiKeys(result) => match result {
+                    Ok(present) => {
+                        self.lyrics_ai.keys = Some(present);
+                        self.lyrics_ai.retry();
+                        self.request_lyrics_extras();
+                    }
+                    Err(error) => self.lyrics_ai.key_error = Some(error),
+                },
                 Event::PlaylistCache {
                     account_id,
                     id,
@@ -4541,6 +4554,87 @@ impl App {
             .map(capitalise_words)
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Fork: asks for the pronunciation and translation of the lyrics on
+    /// show, unless they are here, on the way, or not wanted. The lyrics
+    /// never wait for them.
+    pub fn request_lyrics_extras(&mut self) {
+        let Loadable::Loaded(Some(lyrics)) = &self.lyrics else {
+            return;
+        };
+        let Some(uri) = self.lyrics_uri.clone() else {
+            return;
+        };
+        if self.lyrics_ai.uri.as_deref() != Some(uri.as_str()) {
+            self.lyrics_ai.uri = Some(uri.clone());
+            self.lyrics_ai.id = None;
+            self.lyrics_ai.extras = None;
+            self.lyrics_ai.error = None;
+            self.lyrics_ai.unanswered = false;
+        }
+        let settings = &self.settings.lyrics_ai;
+        if lyrics.instrumental
+            || self.offline
+            || self
+                .lyrics_ai
+                .keys
+                .is_some_and(|keys| !keys.has(settings.provider))
+        {
+            return;
+        }
+        let lines: Vec<&str> = lyrics.lines.iter().map(|line| line.text.as_str()).collect();
+        let target = settings.target(self.locale);
+        let Some(wanted) = crate::lyrics_ai::wanted(&lines, settings, target) else {
+            return;
+        };
+        let (title, artist) = match self.now_playing().filter(|now| now.uri == uri) {
+            Some(now) => (
+                now.title,
+                now.artists
+                    .first()
+                    .map(|artist| artist.name.clone())
+                    .unwrap_or_default(),
+            ),
+            None => Default::default(),
+        };
+        let request = crate::lyrics_ai::Request {
+            uri,
+            title,
+            artist,
+            lines: lines.iter().map(|line| line.to_string()).collect(),
+            target: target.tag,
+            wanted,
+            provider: settings.provider,
+            model: settings.model().to_string(),
+            base_url: settings.base_url().to_string(),
+        };
+        let id = request.id();
+        if self.lyrics_ai.id.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.lyrics_ai.id = Some(id);
+        self.backend.send(Command::LyricsExtras(Box::new(request)));
+    }
+
+    fn receive_lyrics_extras(
+        &mut self,
+        id: &str,
+        result: Result<crate::lyrics_ai::Extras, crate::lyrics_ai::Error>,
+    ) {
+        if self.lyrics_ai.id.as_deref() != Some(id) {
+            return;
+        }
+        match result {
+            Ok(extras) => {
+                self.lyrics_ai.extras = Some(extras);
+                self.lyrics_ai.error = None;
+                // The lines grew; put the sung one back where it sits.
+                self.lyrics_line_shown = None;
+            }
+            Err(crate::lyrics_ai::Error::NoKey) => self.lyrics_ai.unanswered = true,
+            Err(crate::lyrics_ai::Error::Failed(error)) => self.lyrics_ai.error = Some(error),
+        }
     }
 
     /// Pushes the Winamp window's always-on-top level to the live window.
@@ -13633,6 +13727,15 @@ impl App {
             Action::SettingsChanged => {
                 self.settings_dirty = true;
                 ctx.set_theme(self.theme_preference());
+                self.request_lyrics_extras();
+            }
+            Action::RetryLyricsExtras => {
+                self.lyrics_ai.retry();
+                self.request_lyrics_extras();
+            }
+            Action::LoadAiKeys => self.backend.send(Command::LoadAiKeys),
+            Action::SaveAiKey { provider, key } => {
+                self.backend.send(Command::SetAiKey { provider, key });
             }
             Action::SetStartWithComputer(start) => {
                 self.autostart_wanted = Some(start);
@@ -36271,5 +36374,103 @@ mod tests {
         let server_err =
             widgets::sanitize_error_message("500 Internal Server Error", Locale::English);
         assert_eq!(server_err.as_ref(), "500 Internal Server Error");
+    }
+
+    /// Fork: the extra lines arrive after the lyrics and stay with them; an
+    /// answer for an earlier request is ignored, and turning a line off
+    /// hides it at once.
+    #[test]
+    fn lyrics_extras_fill_in_under_the_lyrics_without_a_second_request() {
+        let mut app = test_app("lyrics-extras");
+        let uri = "spotify:track:extras".to_string();
+        app.lyrics_uri = Some(uri.clone());
+        app.lyrics = Loadable::Loaded(Some(crate::lyrics::Lyrics {
+            lines: vec![
+                crate::lyrics::Line {
+                    at_ms: Some(0),
+                    text: "夢ならばどれほどよかったでしょう".into(),
+                },
+                crate::lyrics::Line {
+                    at_ms: Some(5_000),
+                    text: "未だにあなたのことを夢にみる".into(),
+                },
+            ],
+            synced: true,
+            instrumental: false,
+        }));
+        app.settings.lyrics_ai.target_language = "en".into();
+
+        // No key for the chosen provider: nothing is asked.
+        app.lyrics_ai.keys = Some(crate::lyrics_ai::KeysPresent::default());
+        app.request_lyrics_extras();
+        assert_eq!(app.lyrics_ai.id, None);
+
+        app.lyrics_ai.keys = Some(crate::lyrics_ai::KeysPresent {
+            gemini: true,
+            openai: false,
+        });
+        app.request_lyrics_extras();
+        let id = app
+            .lyrics_ai
+            .id
+            .clone()
+            .expect("asked once the key is there");
+        app.request_lyrics_extras();
+        assert_eq!(app.lyrics_ai.id.as_deref(), Some(id.as_str()));
+
+        let extras = crate::lyrics_ai::Extras {
+            lines: vec![
+                crate::lyrics_ai::Extra {
+                    pronunciation: Some("yume naraba dorehodo yokatta deshou".into()),
+                    translation: Some("If only it were a dream".into()),
+                },
+                crate::lyrics_ai::Extra::default(),
+            ],
+        };
+        app.handle_backend_events(vec![Event::LyricsExtras {
+            id: "stale".into(),
+            result: Ok(extras.clone()),
+        }]);
+        assert_eq!(app.lyrics_ai.extras, None);
+
+        app.lyrics_line_shown = Some(Some(0));
+        app.handle_backend_events(vec![Event::LyricsExtras {
+            id: id.clone(),
+            result: Ok(extras),
+        }]);
+        assert_eq!(app.lyrics_line_shown, None, "the sung line is placed again");
+        let settings = app.settings.lyrics_ai.clone();
+        assert_eq!(
+            app.lyrics_ai.line(Some(&uri), 0, &settings),
+            (
+                Some("yume naraba dorehodo yokatta deshou"),
+                Some("If only it were a dream")
+            )
+        );
+        assert_eq!(app.lyrics_ai.line(Some(&uri), 1, &settings), (None, None));
+        assert_eq!(
+            app.lyrics_ai
+                .line(Some("spotify:track:other"), 0, &settings),
+            (None, None)
+        );
+
+        let mut off = settings.clone();
+        off.translate = false;
+        assert_eq!(
+            app.lyrics_ai.line(Some(&uri), 0, &off),
+            (Some("yume naraba dorehodo yokatta deshou"), None)
+        );
+
+        // A failure is shown and asked again only on request.
+        app.lyrics_ai.id = Some("failing".into());
+        app.handle_backend_events(vec![Event::LyricsExtras {
+            id: "failing".into(),
+            result: Err(crate::lyrics_ai::Error::Failed("quota".into())),
+        }]);
+        assert_eq!(app.lyrics_ai.error.as_deref(), Some("quota"));
+        assert!(app.lyrics_ai.extras.is_some(), "earlier lines stay");
+        app.lyrics_ai.retry();
+        assert_eq!(app.lyrics_ai.error, None);
+        assert_eq!(app.lyrics_ai.id, None);
     }
 }

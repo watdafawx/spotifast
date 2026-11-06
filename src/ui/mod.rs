@@ -12,6 +12,8 @@ mod keys;
 pub mod library;
 pub mod login;
 mod lyrics;
+/// Fork: pronunciation and translation under the lyrics.
+mod lyrics_ai;
 pub mod new_releases;
 pub mod player_bar;
 mod prerelease;

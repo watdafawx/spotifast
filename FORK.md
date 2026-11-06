@@ -90,6 +90,34 @@ the mods webview. The fork rebuilds the ones worth keeping natively:
   is tried again after five minutes. Spotify lists no genres for many
   artists, and then the line is hidden. Settings → Appearance → Genres in
   player bar turns it off (`player_bar_genres`, on by default).
+## Lyrics translation and pronunciation (native)
+
+The first step in replacing the ivLyrics webview with native code, and
+not behind the `mods` feature. Under each line of Spotifast's own lyrics
+(panel and full screen) it shows a pronunciation line in the Latin
+alphabet and a translation line, smaller and dimmer, following the
+highlight and autoscroll. Settings, under **Lyrics translation**: both
+switches, the target language (default: the interface language), the
+provider (Gemini, or any OpenAI-compatible endpoint: OpenRouter, OpenAI,
+Groq) with its model, and the API key.
+
+- One request per song with every distinct line (a chorus is sent once),
+  asking for strict JSON: `{"language", "lines": [{"i", "pronunciation",
+  "translation"}]}` (`src/lyrics_ai.rs`, parsed leniently).
+- Pronunciation is skipped for lyrics already in the Latin alphabet, and
+  translation for lyrics already in the target language (a script and
+  common-word check before asking, then the language the model reports).
+- Answers are cached in `lyrics/extras` in the cache folder, keyed by the
+  track, target language and words, for 180 days. Replaying asks nothing.
+- Keys live in the platform credential store (`Slot::AiKeys`), never in
+  `settings.json` or the log. The request runs on the backend runtime; the
+  lyrics show at once and the extra lines fill in when the answer comes.
+
+Upstream files touched: `src/credentials.rs` (the slot), `src/settings.rs`
+(`lyrics_ai`), `src/backend.rs` (`Command::LyricsExtras`, `LoadAiKeys`,
+`SetAiKey`), `src/app.rs` (`lyrics_ai` state, `request_lyrics_extras`),
+`src/model.rs` (three actions), `src/ui/lyrics.rs` (`under_line` and
+`notice` calls), `src/ui/settings.rs` (the section), `src/ui/mod.rs`.
 
 ## Keeping up with upstream
 

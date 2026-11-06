@@ -1842,6 +1842,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     }
 
+    // Fork: pronunciation and translation under the lyrics.
+    let lyrics_ai = gettext(locale, "Lyrics translation");
+    let lyrics_ai_rows = [RowText::new(
+        gettext(locale, "Translation, pronunciation, AI provider and key"),
+        gettext(
+            locale,
+            "Lines under the lyrics from Gemini or an OpenAI-compatible service, with your own key.",
+        ),
+    )];
+    if section_matches(&needle, &lyrics_ai, &lyrics_ai_rows) {
+        any_visible = true;
+        ui.push_id("lyrics-ai-settings", |ui| {
+            section(ui, &palette, &lyrics_ai, |ui| {
+                if super::lyrics_ai::settings(app, ui, &palette) {
+                    changed = true;
+                }
+            });
+        });
+    }
+
     let skins_folder = app.dirs.skins_dir();
     app.winamp.poll_choices();
     app.winamp.refresh_choices(&skins_folder, ui.ctx());

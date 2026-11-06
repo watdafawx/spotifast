@@ -30,16 +30,19 @@ pub enum Slot {
     Playback,
     Proxy,
     Soloist,
+    /// Fork: the listener's AI provider keys for lyrics translation.
+    AiKeys,
 }
 
 impl Slot {
     pub const SPOTIFY: [Self; 3] = [Self::Shared, Self::Personal, Self::Playback];
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Shared,
         Self::Personal,
         Self::Playback,
         Self::Proxy,
         Self::Soloist,
+        Self::AiKeys,
     ];
     pub(crate) fn index(self) -> usize {
         self as usize
@@ -51,6 +54,7 @@ impl Slot {
             Self::Playback => "playback",
             Self::Proxy => "proxy-password",
             Self::Soloist => "soloist-key",
+            Self::AiKeys => "ai-keys",
         }
     }
 }
@@ -62,6 +66,8 @@ pub enum Grant {
     Playback(Credentials),
     Proxy(ProxyPassword),
     Soloist(crate::soloist::Key),
+    /// Fork: lyrics translation keys (src/lyrics_ai.rs).
+    AiKeys(crate::lyrics_ai::Keys),
 }
 
 /// No Debug implementation: the password is usable, and the username is private.
@@ -105,6 +111,7 @@ impl Grant {
             }
             (Slot::Proxy, Self::Proxy(password)) => password.valid(),
             (Slot::Soloist, Self::Soloist(key)) => key.valid(),
+            (Slot::AiKeys, Self::AiKeys(keys)) => !keys.is_empty(),
             _ => false,
         }
     }
@@ -584,7 +591,7 @@ type Job = Box<dyn FnOnce(&mut dyn ProtectedStore) + Send>;
 struct Inner {
     dirs: AppDirs,
     profile: String,
-    generations: [AtomicU64; 5],
+    generations: [AtomicU64; 6],
     // Held only around the tiny local marker files, never a native store call.
     markers: Mutex<()>,
     jobs: mpsc::SyncSender<Job>,
@@ -793,7 +800,7 @@ impl Store {
     }
 
     fn legacy_paths(&self, slot: Slot) -> Vec<PathBuf> {
-        if slot == Slot::Soloist {
+        if slot == Slot::Soloist || slot == Slot::AiKeys {
             return Vec::new();
         }
         if slot == Slot::Proxy {
@@ -807,6 +814,7 @@ impl Store {
             Slot::Playback => dirs.credentials_dir().join("credentials.json"),
             Slot::Proxy => unreachable!("proxy legacy paths handled above"),
             Slot::Soloist => unreachable!("Soloist has no legacy files"),
+            Slot::AiKeys => unreachable!("AI keys have no legacy files"),
         };
         let mut paths = vec![path.clone(), path.with_extension("json.tmp")];
         if slot != Slot::Playback {
@@ -1449,6 +1457,7 @@ mod tests {
             Grant::Playback(credentials) => serde_json::to_vec(credentials).unwrap(),
             Grant::Proxy(password) => password.password.as_bytes().to_vec(),
             Grant::Soloist(_) => panic!("Soloist has no legacy format"),
+            Grant::AiKeys(_) => panic!("AI keys have no legacy format"),
         };
         std::fs::write(path, bytes).unwrap();
     }
@@ -1599,6 +1608,7 @@ mod tests {
                 account: "dummy-account".into(),
                 value: "dummy-soloist-key".into(),
             }),
+            ai_keys(),
         ];
         for (slot, grant) in Slot::ALL.into_iter().zip(grants.iter()) {
             store.lease(slot).save(grant.clone()).await.unwrap();
@@ -1609,6 +1619,7 @@ mod tests {
         }
         store.revoke_spotify().unwrap();
         store.revoke(Slot::Proxy).unwrap();
+        store.revoke(Slot::AiKeys).unwrap();
         for slot in Slot::ALL {
             let lease = store.lease(slot);
             lease.delete().await.unwrap();
@@ -1697,6 +1708,7 @@ mod tests {
                 account: "dummy-account".into(),
                 value: "dummy-soloist-key".into(),
             }),
+            ai_keys(),
         ];
         for (slot, grant) in Slot::ALL.into_iter().zip(grants.iter()) {
             store.lease(slot).save(grant.clone()).await.unwrap();
@@ -1850,6 +1862,32 @@ mod tests {
             b"dummy-dpapi-grant"
         );
         assert_eq!(Dpapi.open(&sealed, b"context-b"), Err(Error::Invalid));
+    }
+
+    fn ai_keys() -> Grant {
+        Grant::AiKeys(crate::lyrics_ai::Keys {
+            gemini: "dummy-gemini-key".into(),
+            openai: String::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn ai_keys_round_trip_and_revoke() {
+        let f = Fixture::new();
+        let empty = Grant::AiKeys(crate::lyrics_ai::Keys::default());
+        assert!(f.store.lease(Slot::AiKeys).save(empty).await.is_err());
+        f.store.lease(Slot::AiKeys).save(ai_keys()).await.unwrap();
+        assert!(f.restart().lease(Slot::AiKeys).load().await.unwrap().grant == Some(ai_keys()));
+        f.store.revoke(Slot::AiKeys).unwrap();
+        assert!(
+            f.restart()
+                .lease(Slot::AiKeys)
+                .load()
+                .await
+                .unwrap()
+                .grant
+                .is_none()
+        );
     }
 
     #[tokio::test]

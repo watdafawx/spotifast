@@ -1366,6 +1366,15 @@ pub enum Action {
     FollowLyrics,
     PauseLyricsFollow,
     RetryLyrics,
+    /// Fork: ask again for the lyrics' extra lines after a failure.
+    RetryLyricsExtras,
+    /// Fork: ask which AI keys are saved (src/lyrics_ai.rs).
+    LoadAiKeys,
+    /// Fork: save an AI provider's key; empty removes it.
+    SaveAiKey {
+        provider: crate::lyrics_ai::Provider,
+        key: crate::lyrics_ai::SecretKey,
+    },
     ToggleDevicesPopup,
     /// Ask GitHub for the latest release and report the result to the user.
     CheckForUpdates,
