@@ -720,9 +720,12 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
         .now_playing()
         .and_then(|now| preferred_backdrop_art(now.art_small, now.art_url));
     let painter = ui.painter().with_clip_rect(rect);
-    if let Some(texture) = app
-        .lyrics_backdrop
-        .texture(ui.ctx(), app.backend.art(), art.as_deref())
+    // Fork: the song's music video in place of its cover, once a frame of
+    // it is ready; the cover stays until then, so nothing goes black.
+    if crate::lyrics_video::paint(app, &painter, rect) {
+    } else if let Some(texture) =
+        app.lyrics_backdrop
+            .texture(ui.ctx(), app.backend.art(), art.as_deref())
     {
         painter.image(
             texture.id(),

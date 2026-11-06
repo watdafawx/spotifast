@@ -725,6 +725,8 @@ pub enum Command {
     /// Fork: pronunciation and translation lines for a song's lyrics
     /// (src/lyrics_ai.rs).
     LyricsExtras(Box<crate::lyrics_ai::Request>),
+    /// Fork: find the music video for a song (src/lyrics_video.rs).
+    FindLyricsVideo(Box<crate::lyrics_video::Request>),
     /// Fork: read which AI keys are saved, for the settings page.
     LoadAiKeys,
     /// Fork: save a provider's AI key; an empty key removes it.
@@ -1026,6 +1028,11 @@ pub enum Event {
     },
     /// Fork: which AI keys are saved, or why storing one failed.
     AiKeys(Result<crate::lyrics_ai::KeysPresent, String>),
+    /// Fork: the music video for a song, `None` when it has none.
+    LyricsVideo {
+        uri: String,
+        result: Result<Option<crate::lyrics_video::VideoInfo>, String>,
+    },
     ProxyRestored {
         config: ProxyConfig,
         password: Option<crate::credentials::ProxyPassword>,
@@ -2785,6 +2792,7 @@ impl Worker {
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
                 Command::LyricsExtras(request) => self.fetch_lyrics_extras(*request),
                 Command::LoadAiKeys => self.load_ai_keys(),
+                Command::FindLyricsVideo(request) => self.find_lyrics_video(*request),
                 Command::SetAiKey { provider, key } => self.set_ai_key(provider, key),
                 Command::AiKeysLoaded { lease, result } => self.on_ai_keys_loaded(lease, result),
                 #[cfg(feature = "mods")]
@@ -4860,6 +4868,23 @@ impl Worker {
                 log::warn!("lyrics extras unavailable: {error}");
             }
             let _ = events.send(Event::LyricsExtras { id, result });
+            waker.wake();
+        });
+    }
+
+    fn find_lyrics_video(&self, request: crate::lyrics_video::Request) {
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let cache_dir = crate::lyrics_video::cache_dir(&self.dirs.lyrics_cache_dir());
+        tokio::task::spawn_blocking(move || {
+            let result = crate::lyrics_video::find(&cache_dir, &request);
+            if let Err(error) = &result {
+                log::debug!("lyrics video unavailable: {error}");
+            }
+            let _ = events.send(Event::LyricsVideo {
+                uri: request.uri,
+                result,
+            });
             waker.wake();
         });
     }

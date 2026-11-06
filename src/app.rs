@@ -716,6 +716,8 @@ pub struct App {
     pub lyrics_line_shown: Option<Option<usize>>,
     /// Fork: pronunciation and translation under the lyrics.
     pub lyrics_ai: crate::lyrics_ai::State,
+    /// Fork: the music video behind full-screen lyrics.
+    pub lyrics_video: crate::lyrics_video::State,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -1432,6 +1434,7 @@ impl App {
             lyrics_following: true,
             lyrics_line_shown: None,
             lyrics_ai: Default::default(),
+            lyrics_video: Default::default(),
             show_devices: false,
             toasts: Vec::new(),
             actions: Vec::new(),
@@ -3083,6 +3086,12 @@ impl App {
                     }
                 }
                 Event::LyricsExtras { id, result } => self.receive_lyrics_extras(&id, result),
+                Event::LyricsVideo { uri, result } => {
+                    if self.lyrics_video.uri.as_deref() == Some(uri.as_str()) {
+                        // A failed lookup shows the cover, as no video does.
+                        self.lyrics_video.info = Some(result.ok().flatten());
+                    }
+                }
                 Event::AiKeys(result) => match result {
                     Ok(present) => {
                         self.lyrics_ai.keys = Some(present);
@@ -6009,6 +6018,8 @@ impl App {
     fn sync_media_controls(&mut self, ctx: &egui::Context) {
         #[cfg(feature = "mods")]
         crate::mods::sync(self, ctx);
+        // Fork: the music video behind full-screen lyrics.
+        crate::lyrics_video::sync(self, ctx);
         let art_file = self
             .now_playing()
             .and_then(|now| now.art_url)

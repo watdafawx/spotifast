@@ -119,6 +119,22 @@ Upstream files touched: `src/credentials.rs` (the slot), `src/settings.rs`
 `src/model.rs` (three actions), `src/ui/lyrics.rs` (`under_line` and
 `notice` calls), `src/ui/settings.rs` (the section), `src/ui/mod.rs`.
 
+## Music video behind full-screen lyrics (native)
+
+`src/lyrics_video.rs`, Windows only, not behind the `mods` feature. With
+full-screen lyrics open, the backend searches YouTube through yt-dlp
+("artist title official music video", picking an official upload about
+as long as the song, never a lyric/audio/live upload) and caches the
+pick per track for 7 days (1 day when nothing fits). mpv (`libmpv-2.dll`,
+loaded at run time beside the app or from PATH) streams it without sound
+and draws it with its OpenGL render API inside egui's paint callback
+(`src/lyrics_video/mpv.rs`); the cover shows until the first frame. It
+follows the song's position (seek on drift over 0.5 s, pause with the
+song) and stops 30 s after full screen closes. Settings: Lyrics extras →
+Video background. Needs `libmpv-2.dll` (shinchiro's mpv-winbuild) and a
+current `yt-dlp.exe` beside Spotifast or on PATH. ivLyrics' community
+video service is not used: it answers other apps with a warning video.
+
 ## Keeping up with upstream
 
 Everything fork-specific lives in new files: `src/mods/`, this file,

@@ -1843,14 +1843,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     // Fork: pronunciation and translation under the lyrics.
-    let lyrics_ai = gettext(locale, "Lyrics translation");
-    let lyrics_ai_rows = [RowText::new(
-        gettext(locale, "Translation, pronunciation, AI provider and key"),
-        gettext(
-            locale,
-            "Lines under the lyrics from Gemini or an OpenAI-compatible service, with your own key.",
+    let lyrics_ai = gettext(locale, "Lyrics extras");
+    let lyrics_ai_rows = [
+        RowText::new(
+            gettext(locale, "Translation, pronunciation, AI provider and key"),
+            gettext(
+                locale,
+                "Lines under the lyrics from Gemini or an OpenAI-compatible service, with your own key.",
+            ),
         ),
-    )];
+        RowText::new(
+            gettext(locale, "Video background"),
+            gettext(locale, "Music videos behind full-screen lyrics."),
+        ),
+    ];
     if section_matches(&needle, &lyrics_ai, &lyrics_ai_rows) {
         any_visible = true;
         ui.push_id("lyrics-ai-settings", |ui| {

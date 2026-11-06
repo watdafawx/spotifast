@@ -213,6 +213,38 @@ const KEYS_ASKED: &str = "lyrics-ai-keys-asked";
 pub(super) fn settings(app: &mut App, ui: &mut egui::Ui, palette: &Palette) -> bool {
     let locale = app.locale;
     let mut changed = false;
+    let available = crate::lyrics_video::available();
+    let video_note = if available {
+        gettext(
+            locale,
+            "A community-picked music video behind full-screen lyrics, in time with the song.",
+        )
+    } else {
+        gettext(
+            locale,
+            "Needs libmpv-2.dll and yt-dlp.exe beside Spotifast or on the system path.",
+        )
+    };
+    widgets::setting_row(
+        ui,
+        palette,
+        &gettext(locale, "Video background"),
+        &video_note,
+        |ui| {
+            ui.add_enabled_ui(available, |ui| {
+                if widgets::switch(
+                    ui,
+                    palette,
+                    &gettext(locale, "Video background"),
+                    &mut app.settings.lyrics_video,
+                )
+                .changed()
+                {
+                    changed = true;
+                }
+            });
+        },
+    );
     if app.lyrics_ai.keys.is_none()
         && !ui.data(|data| {
             data.get_temp::<bool>(egui::Id::new(KEYS_ASKED))

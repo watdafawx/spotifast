@@ -29,6 +29,8 @@ pub mod local_tags;
 pub mod lyrics;
 /// Fork: AI pronunciation and translation under the lyrics.
 pub mod lyrics_ai;
+/// Fork: music videos behind full-screen lyrics.
+pub mod lyrics_video;
 #[cfg(target_os = "macos")]
 pub mod mac_links;
 #[cfg(target_os = "macos")]

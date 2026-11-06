@@ -480,6 +480,9 @@ pub struct Settings {
     /// Fork: pronunciation and translation under the lyrics. The keys are
     /// in the credential store, never here.
     pub lyrics_ai: crate::lyrics_ai::AiSettings,
+    /// Fork: a community-picked music video behind full-screen lyrics,
+    /// where libmpv is installed (src/lyrics_video.rs).
+    pub lyrics_video: bool,
 }
 
 impl std::fmt::Debug for Settings {
@@ -594,6 +597,7 @@ impl Default for Settings {
             proxy_password: String::new(),
             proxy_password_legacy: false,
             lyrics_ai: crate::lyrics_ai::AiSettings::default(),
+            lyrics_video: true,
         }
     }
 }
