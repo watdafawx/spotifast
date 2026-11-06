@@ -20,7 +20,8 @@ pub mod mpv;
 const FOUND_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// A song with no fitting video is searched again after a day.
 const MISSING_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
-const CACHE_VERSION: u32 = 1;
+/// 2: picks carry the offset measured from the video's captions.
+const CACHE_VERSION: u32 = 2;
 
 /// The video for one recording.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,6 +165,9 @@ pub struct Request {
     pub artists: Vec<String>,
     pub album: String,
     pub duration_ms: u32,
+    /// The song's timed lyric lines (start, words), to line the video's
+    /// captions up with; empty when the lyrics carry no timing.
+    pub lyrics: Vec<(u32, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -223,9 +227,203 @@ pub fn find(cache_dir: &Path, request: &Request) -> Result<Option<VideoInfo>, St
     if !output.status.success() {
         return Err(format!("yt-dlp failed ({})", output.status));
     }
-    let found = pick(&String::from_utf8_lossy(&output.stdout), request);
+    let mut found = pick(&String::from_utf8_lossy(&output.stdout), request);
+    if let Some(info) = &mut found {
+        sync_from_captions(cache_dir, info, request);
+    }
     write_cache(&path, &found);
     Ok(found)
+}
+
+/// Lines the video up with the song from its captions: the music video's
+/// own subtitles or YouTube's automatic ones, matched against the song's
+/// timed lyrics. Leaves the video on the song's clock when they do not
+/// agree.
+fn sync_from_captions(cache_dir: &Path, info: &mut VideoInfo, request: &Request) {
+    let Some(&(first, _)) = request
+        .lyrics
+        .iter()
+        .find(|(_, words)| !words.trim().is_empty())
+    else {
+        return;
+    };
+    let folder = cache_dir.join(format!("captions-{}", info.youtube_id));
+    let _ = std::fs::create_dir_all(&folder);
+    let mut command = std::process::Command::new(yt_dlp());
+    command
+        .args([
+            "--no-update",
+            "--no-warnings",
+            "--skip-download",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            ".*-orig,en,ko,ja,zh-Hans,zh-Hant,es,pt,fr,de",
+            "--sub-format",
+            "vtt",
+            "-o",
+        ])
+        .arg(folder.join("%(id)s"))
+        .arg(format!(
+            "https://www.youtube.com/watch?v={}",
+            info.youtube_id
+        ))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = command.status();
+    let mut cues = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&folder) {
+        for entry in entries.flatten() {
+            if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                cues.extend(parse_vtt(&text));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+    match estimate_offset(&cues, &request.lyrics) {
+        Some(offset) => {
+            log::info!(
+                "lyrics video for {}: captions put the video {offset:+.1}s from the song",
+                request.uri
+            );
+            info.caption_start = Some(f64::from(first) / 1000.0 + offset);
+            info.automatic = false;
+        }
+        None => log::info!(
+            "lyrics video for {}: no captions to sync by ({} cues)",
+            request.uri,
+            cues.len()
+        ),
+    }
+}
+
+/// The cues of a WebVTT file: start in seconds and words, with timing
+/// tags, entities, notes and music symbols taken out.
+pub fn parse_vtt(text: &str) -> Vec<(f64, String)> {
+    fn seconds(stamp: &str) -> Option<f64> {
+        let mut total = 0.0;
+        for part in stamp.trim().split(':') {
+            total = total * 60.0 + part.parse::<f64>().ok()?;
+        }
+        Some(total)
+    }
+    let mut cues = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let Some((start, _)) = line.split_once("-->") else {
+            continue;
+        };
+        let Some(start) = seconds(start) else {
+            continue;
+        };
+        let mut words = String::new();
+        for line in lines.by_ref() {
+            if line.trim().is_empty() {
+                break;
+            }
+            let mut plain = String::new();
+            let mut tag = false;
+            for c in line.chars() {
+                match c {
+                    '<' => tag = true,
+                    '>' if tag => tag = false,
+                    _ if !tag => plain.push(c),
+                    _ => {}
+                }
+            }
+            let plain = plain
+                .replace("&gt;", "")
+                .replace("&lt;", "")
+                .replace("&amp;", "&")
+                .replace("[music]", "")
+                .replace("[Music]", "")
+                .replace('♪', "");
+            if !plain.trim().is_empty() {
+                words.push(' ');
+                words.push_str(plain.trim());
+            }
+        }
+        if !words.trim().is_empty() {
+            cues.push((start, words.trim().to_string()));
+        }
+    }
+    cues
+}
+
+/// Letters and digits only, lower case.
+fn squash(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// How alike two lines are, 0 to 1, by the pairs of letters they share.
+fn likeness(a: &[char], b: &[char]) -> f64 {
+    if a.len() < 2 || b.len() < 2 {
+        return if a == b && !a.is_empty() { 1.0 } else { 0.0 };
+    }
+    let pairs =
+        |text: &[char]| -> Vec<(char, char)> { text.windows(2).map(|w| (w[0], w[1])).collect() };
+    let (left, mut right) = (pairs(a), pairs(b));
+    let total = left.len() + right.len();
+    let mut shared = 0;
+    for pair in left {
+        if let Some(at) = right.iter().position(|other| *other == pair) {
+            right.swap_remove(at);
+            shared += 1;
+        }
+    }
+    2.0 * shared as f64 / total as f64
+}
+
+/// The video's offset from the song in seconds, from caption cues and the
+/// song's timed lines. Every lyric line that a caption matches votes for
+/// the gap between them; repeated choruses vote for every repeat, so the
+/// gap most lines agree on wins. `None` unless three different lines
+/// agree within a second.
+pub fn estimate_offset(cues: &[(f64, String)], lyrics: &[(u32, String)]) -> Option<f64> {
+    let cues: Vec<(f64, Vec<char>)> = cues
+        .iter()
+        .map(|(at, words)| (*at, squash(words)))
+        .collect();
+    let mut votes: Vec<(usize, f64)> = Vec::new();
+    for (line, (at, words)) in lyrics.iter().enumerate() {
+        let words = squash(words);
+        if words.len() < 4 {
+            continue;
+        }
+        for (start, cue) in &cues {
+            // A cue may hold this line and the next; compare like lengths.
+            let near = cue.len() <= words.len() * 2 + 4;
+            if near && likeness(&words, cue) >= 0.6 {
+                votes.push((line, start - f64::from(*at) / 1000.0));
+            }
+        }
+    }
+    let mut best: Option<(usize, f64)> = None;
+    for (_, gap) in &votes {
+        let agreeing: Vec<&(usize, f64)> = votes
+            .iter()
+            .filter(|(_, other)| (other - gap).abs() <= 1.0)
+            .collect();
+        let mut lines: Vec<usize> = agreeing.iter().map(|(line, _)| *line).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        if best.is_none_or(|(held, _)| lines.len() > held) {
+            let mut gaps: Vec<f64> = agreeing.iter().map(|(_, gap)| *gap).collect();
+            gaps.sort_by(f64::total_cmp);
+            best = Some((lines.len(), gaps[gaps.len() / 2]));
+        }
+    }
+    best.filter(|(lines, _)| *lines >= 3).map(|(_, gap)| gap)
 }
 
 /// yt-dlp beside the app, else on the search path.
@@ -348,6 +546,18 @@ fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
     };
     state.last_shown = Some(Instant::now());
     if state.uri.as_deref() != Some(now.uri.as_str()) {
+        // The captions are lined up with the lyrics, so wait for them.
+        let lyrics = match &app.lyrics {
+            _ if app.lyrics_uri.as_deref() != Some(now.uri.as_str()) => return,
+            crate::model::Loadable::NotLoaded | crate::model::Loadable::Loading => return,
+            crate::model::Loadable::Loaded(Some(lyrics)) if lyrics.synced => lyrics
+                .lines
+                .iter()
+                .filter_map(|line| Some((line.at_ms?, line.text.clone())))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let state = &mut app.lyrics_video;
         state.uri = Some(now.uri.clone());
         state.info = None;
         if let Some(player) = &state.player {
@@ -365,10 +575,12 @@ fn sync_windows(app: &mut crate::app::App, ctx: &egui::Context) {
                         .collect(),
                     album: now.album_name.clone(),
                     duration_ms: now.duration_ms,
+                    lyrics,
                 },
             )));
         return;
     }
+    let state = &mut app.lyrics_video;
     let Some(Some(info)) = state.info.clone() else {
         return;
     };
@@ -499,6 +711,7 @@ mod tests {
             artists: vec!["K/DA".into()],
             album: String::new(),
             duration_ms: 187_000,
+            lyrics: Vec::new(),
         };
         let results = "aaaaaaaaaaa\t190\tK/DA - FIRESTARTER (Lyrics)\n\
                        bbbbbbbbbbb\t400\tFIRESTARTER 1 hour loop\n\
@@ -514,6 +727,31 @@ mod tests {
             "ddddddddddd"
         );
         assert_eq!(pick("", &request), None);
+    }
+
+    #[test]
+    fn captions_line_the_video_up_with_the_lyrics() {
+        let vtt = "WEBVTT\nKind: captions\n\n00:00:13.665 --> 00:00:15.458\n♪ I’m a fire starter ♪\n\n\
+                   00:00:15.458 --> 00:00:17.208\n♪ Work a lil harder ♪\n\n\
+                   00:00:17.208 --> 00:00:18.623\n<c>Got</c> me fired up\n\n\
+                   00:00:20.916 --> 00:00:22.750\nImma burn it down like\n\n\
+                   00:01:13.665 --> 00:01:15.458\nI'm a fire starter\n";
+        let cues = parse_vtt(vtt);
+        assert_eq!(cues[0].1, "I’m a fire starter");
+        assert_eq!(cues[2].1, "Got me fired up");
+        assert!((cues[4].0 - 73.665).abs() < 0.001);
+        // The song sings the same lines 5 s earlier than the video.
+        let lyrics = vec![
+            (8_600, "I'm a fire starter".to_string()),
+            (10_400, "Work a lil harder".to_string()),
+            (12_200, "Got me fired up".to_string()),
+            (15_900, "Imma burn it down like".to_string()),
+        ];
+        let offset = estimate_offset(&cues, &lyrics).unwrap();
+        assert!((offset - 5.0).abs() < 0.2, "{offset}");
+        // Two matching lines are not enough to trust.
+        assert_eq!(estimate_offset(&cues, &lyrics[..2]), None);
+        assert_eq!(estimate_offset(&[], &lyrics), None);
     }
 
     #[test]

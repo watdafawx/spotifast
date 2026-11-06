@@ -722,7 +722,8 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
     let painter = ui.painter().with_clip_rect(rect);
     // Fork: the song's music video in place of its cover, once a frame of
     // it is ready; the cover stays until then, so nothing goes black.
-    if crate::lyrics_video::paint(app, &painter, rect) {
+    let video = crate::lyrics_video::paint(app, &painter, rect);
+    if video {
     } else if let Some(texture) =
         app.lyrics_backdrop
             .texture(ui.ctx(), app.backend.art(), art.as_deref())
@@ -734,7 +735,13 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
             Color32::from_gray(180),
         );
     }
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(120));
+    // A moving video is busier than a blurred cover; darken it more so the
+    // words stay readable.
+    painter.rect_filled(
+        rect,
+        0.0,
+        Color32::from_black_alpha(if video { 170 } else { 120 }),
+    );
     widgets::paint_vertical_gradient(
         ui,
         rect,

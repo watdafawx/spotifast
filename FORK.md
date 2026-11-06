@@ -129,7 +129,9 @@ pick per track for 7 days (1 day when nothing fits). mpv (`libmpv-2.dll`,
 loaded at run time beside the app or from PATH) streams it without sound
 and draws it with its OpenGL render API inside egui's paint callback
 (`src/lyrics_video/mpv.rs`); the cover shows until the first frame. It
-follows the song's position (seek on drift over 0.5 s, pause with the
+follows the song's position, lined up by matching the video's captions
+(its own or YouTube's automatic ones) to the timed lyrics (seek on
+drift over 0.5 s, pause with the
 song) and stops 30 s after full screen closes. Settings: Lyrics extras →
 Video background. Needs `libmpv-2.dll` (shinchiro's mpv-winbuild) and a
 current `yt-dlp.exe` beside Spotifast or on PATH. ivLyrics' community
