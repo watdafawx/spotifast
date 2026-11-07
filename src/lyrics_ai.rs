@@ -1335,7 +1335,9 @@ pub async fn list_models(
                                 .get("supportedGenerationMethods")
                                 .and_then(|methods| methods.as_array())
                                 .is_none_or(|methods| {
-                                    methods.iter().any(|m| m.as_str() == Some("generateContent"))
+                                    methods
+                                        .iter()
+                                        .any(|m| m.as_str() == Some("generateContent"))
                                 })
                         })
                         .filter_map(|model| model.get("name").and_then(|name| name.as_str()))
@@ -1375,7 +1377,8 @@ pub async fn list_models(
                                     .and_then(|price| price.parse::<f64>().ok())
                                     == Some(0.0)
                             };
-                            let free = id.ends_with(":free") || (zero("prompt") && zero("completion"));
+                            let free =
+                                id.ends_with(":free") || (zero("prompt") && zero("completion"));
                             Some(ModelChoice {
                                 id: id.to_string(),
                                 free,

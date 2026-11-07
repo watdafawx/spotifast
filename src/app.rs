@@ -4666,7 +4666,7 @@ impl App {
             provider: settings.provider,
             model: settings.model().to_string(),
             base_url: settings.base_url().to_string(),
-            fallbacks: self.lyrics_ai_fallbacks(&settings),
+            fallbacks: self.lyrics_ai_fallbacks(settings),
         };
         let id = request.id();
         if self.lyrics_ai.id.as_deref() == Some(id.as_str()) {

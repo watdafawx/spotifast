@@ -581,9 +581,11 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
         .lyrics_ai
         .keys
         .is_some_and(|keys| keys.has(provider_now));
-    let fetched = app.lyrics_ai.models.as_ref().filter(|list| {
-        list.provider == provider_now && list.base_url == base_url
-    });
+    let fetched = app
+        .lyrics_ai
+        .models
+        .as_ref()
+        .filter(|list| list.provider == provider_now && list.base_url == base_url);
     let loading = app.lyrics_ai.models_loading.as_ref() == Some(&(provider_now, base_url.clone()));
     let failed = app
         .lyrics_ai
@@ -621,8 +623,11 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
                 .height(400.0)
                 .show_ui(ui, |ui| {
                     // Free ones first, when the provider says which are.
-                    let mut choices: Vec<&crate::lyrics_ai::ModelChoice> =
-                        list.models.iter().filter(|choice| choice.free || !free_only).collect();
+                    let mut choices: Vec<&crate::lyrics_ai::ModelChoice> = list
+                        .models
+                        .iter()
+                        .filter(|choice| choice.free || !free_only)
+                        .collect();
                     choices.sort_by_key(|choice| !choice.free);
                     for choice in choices {
                         let label = if choice.free {
@@ -728,7 +733,10 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
         } else {
             wrapped_hint(
                 ui,
-                gettext(locale, "Save an API key to pick from the provider's models."),
+                gettext(
+                    locale,
+                    "Save an API key to pick from the provider's models.",
+                ),
                 theme::regular(12.0),
                 palette.secondary,
             );

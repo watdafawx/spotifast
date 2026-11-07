@@ -199,7 +199,10 @@ async fn musicbrainz_named(
         get_json(
             http.get(format!("{MUSICBRAINZ}/artist"))
                 .query(&[
-                    ("query", format!("artist:\"{}\"", escape_query(name)).as_str()),
+                    (
+                        "query",
+                        format!("artist:\"{}\"", escape_query(name)).as_str(),
+                    ),
                     ("limit", "5"),
                     ("fmt", "json"),
                 ])
@@ -247,7 +250,9 @@ fn wikidata_genres(found: &serde_json::Value) -> Vec<String> {
         .into_iter()
         .flatten()
     {
-        let Some(label) = binding.pointer("/gLabel/value").and_then(serde_json::Value::as_str)
+        let Some(label) = binding
+            .pointer("/gLabel/value")
+            .and_then(serde_json::Value::as_str)
         else {
             continue;
         };
@@ -385,7 +390,8 @@ fn musicbrainz_tags(artist: &serde_json::Value) -> Vec<String> {
     musicbrainz_votes(artist, "tags", 2)
         .into_iter()
         .filter(|tag| {
-            !LASTFM_IGNORED.contains(&tag.as_str()) && !tag.starts_with(|c: char| c.is_ascii_digit())
+            !LASTFM_IGNORED.contains(&tag.as_str())
+                && !tag.starts_with(|c: char| c.is_ascii_digit())
         })
         .collect()
 }
