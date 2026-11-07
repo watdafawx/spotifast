@@ -2640,6 +2640,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         .open_url(egui::OpenUrl::new_tab(env!("CARGO_PKG_REPOSITORY")));
                 }
             });
+            // Where updates come from: builds with mods read the fork's
+            // releases, not upstream's.
+            ui.add_space(8.0);
+            let repository = crate::updates::repository();
+            let from = gettext(
+                locale,
+                // Translators: {repository} is the GitHub repository, such as owner/name.
+                "Updates come from {repository}",
+            )
+            .replace("{repository}", repository);
+            if theme::link(ui, from, theme::regular(13.0), palette.secondary)
+                .on_hover_text(format!("https://github.com/{repository}/releases"))
+                .clicked()
+            {
+                app.actions.push(Action::OpenUrl(format!(
+                    "https://github.com/{repository}/releases"
+                )));
+            }
             ui.add_space(14.0);
             if widgets::credit(ui, &palette, locale) {
                 app.actions

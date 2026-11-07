@@ -23,6 +23,12 @@ const REPOSITORY: &str = "watdafawx/spotifast";
 #[cfg(not(feature = "mods"))]
 const REPOSITORY: &str = "crmne/spotifast";
 
+/// The GitHub repository this build reads its updates from, as
+/// `owner/name`, for Settings to show.
+pub const fn repository() -> &'static str {
+    REPOSITORY
+}
+
 /// Fork: the fork's releases are signed with the fork's own key (Release
 /// mods workflow, `MODS_UPDATE_SIGNING_KEY` secret), not upstream's.
 #[cfg(feature = "mods")]
