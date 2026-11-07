@@ -212,6 +212,46 @@ struct Status {
     paused: bool,
 }
 
+/// mpv expects OpenGL as a fresh context has it, and egui leaves its own
+/// buffers, vertex array, program and switches bound. Put the ones mpv's
+/// texture and draw calls trip over back to their defaults; egui sets its own
+/// up again after the callback.
+unsafe fn reset_gl_state(gl: &glow::Context) {
+    unsafe {
+        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        gl.bind_vertex_array(None);
+        gl.use_program(None);
+        gl.active_texture(glow::TEXTURE0);
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
+        gl.disable(glow::BLEND);
+        gl.disable(glow::DEPTH_TEST);
+        gl.disable(glow::STENCIL_TEST);
+        gl.disable(glow::CULL_FACE);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.color_mask(true, true, true, true);
+    }
+}
+
+/// Logs the first few OpenGL errors, with where they came up, and clears
+/// them so the next stage starts clean.
+unsafe fn note_gl_error(gl: &glow::Context, stage: &str) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    loop {
+        let error = unsafe { gl.get_error() };
+        if error == glow::NO_ERROR {
+            return;
+        }
+        if LOGGED.fetch_add(1, Ordering::Relaxed) < 8 {
+            log::warn!("lyrics video: OpenGL error {error:#x} {stage}");
+        }
+    }
+}
+
 /// Whether the blur shader is on disk at `path`. The first call writes it
 /// on a thread of its own, never the UI thread, and answers false until
 /// that is done.
@@ -629,10 +669,14 @@ impl Player {
                 render.framebuffer = Some(framebuffer);
                 render.size = (w, h);
                 render.fresh_texture = true;
+                log::info!("lyrics video: drawing into {w}x{h} px");
             }
             let Some(framebuffer) = render.framebuffer else {
                 return;
             };
+            // Whatever our own texture work above raised, not mpv's to find.
+            note_gl_error(gl, "before mpv draws");
+            reset_gl_state(gl);
             // A new frame from mpv, or a new texture to fill: draw. Else the
             // last frame is still in the texture; only copy it again, so
             // egui's repaints do not make mpv draw (and ask for more).
@@ -668,6 +712,7 @@ impl Player {
                     },
                 ];
                 (self.api.render_render)(render.context, params.as_mut_ptr());
+                note_gl_error(gl, "after mpv drew");
             }
             // Copy the frame into the viewport of whatever egui draws to.
             let target = NonZeroU32::new(previous as u32).map(glow::NativeFramebuffer);
