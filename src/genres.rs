@@ -4,9 +4,11 @@
 //! API answers `"genres": []` for every artist, and the session's artist
 //! metadata dropped the field. So the genres come from
 //! [MusicBrainz](https://musicbrainz.org), which links many artists to their
-//! Spotify ID, and, when it has none and the listener saved a key, from
-//! [Last.fm](https://www.last.fm)'s top tags for the artist's name. Answers
-//! are kept on disk, so an artist is looked up about once a month.
+//! Spotify ID. When it has no genres, [Wikidata](https://www.wikidata.org)
+//! is asked by the same Spotify ID, then MusicBrainz by the artist's name
+//! (only for an unmistakable match), and, when none has any and the listener
+//! saved a key, [Last.fm](https://www.last.fm)'s top tags for the name.
+//! Answers are kept on disk, so an artist is looked up about once a month.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -15,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 const MUSICBRAINZ: &str = "https://musicbrainz.org/ws/2";
 const LASTFM: &str = "https://ws.audioscrobbler.com/2.0/";
+const WIKIDATA: &str = "https://query.wikidata.org/sparql";
 /// MusicBrainz asks for a contact in the User-Agent and at most one request a
 /// second from each client.
 const MUSICBRAINZ_AGENT: &str = concat!(
@@ -25,7 +28,9 @@ const MUSICBRAINZ_AGENT: &str = concat!(
 const MUSICBRAINZ_SPACING: Duration = Duration::from_millis(1100);
 const FOUND_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const MISSING_LIFETIME: Duration = Duration::from_secs(3 * 24 * 60 * 60);
-const CACHE_VERSION: u32 = 1;
+/// 2: misses are asked again, now that artists MusicBrainz has no Spotify
+/// link or genres for are also found by name.
+const CACHE_VERSION: u32 = 2;
 /// The most genres kept for an artist; the player bar shows three.
 const KEEP: usize = 5;
 /// Last.fm tags below this share of the top tag's count are noise.
@@ -109,7 +114,21 @@ pub async fn fetch(
     if let Some(cached) = read_cache(&path, lastfm_key.is_some()) {
         return Ok(cached);
     }
-    let mut genres = musicbrainz(http, gate, &request.id).await?;
+    // Sources in order of trust: MusicBrainz through the Spotify link, then
+    // Wikidata through the same Spotify ID, then MusicBrainz by name, then
+    // Last.fm when the listener saved a key.
+    let linked = musicbrainz_linked(http, gate, &request.id).await?;
+    let mut genres = linked.genres;
+    if genres.is_empty() {
+        // Optional: a Wikidata outage must not hide what MusicBrainz knows.
+        match wikidata(http, &request.id).await {
+            Ok(found) => genres = found,
+            Err(error) => log::debug!("genres: {error}"),
+        }
+    }
+    if genres.is_empty() {
+        genres = musicbrainz_named(http, gate, &request.name, linked.artist.as_deref()).await?;
+    }
     let mut asked_lastfm = false;
     if genres.is_empty()
         && let Some(key) = lastfm_key
@@ -128,7 +147,18 @@ pub async fn fetch(
     Ok(genres)
 }
 
-async fn musicbrainz(http: &reqwest::Client, gate: &Gate, id: &str) -> Result<Vec<String>, String> {
+/// What the Spotify link found: the MusicBrainz artist, if linked, and its
+/// genres.
+struct Linked {
+    artist: Option<String>,
+    genres: Vec<String>,
+}
+
+async fn musicbrainz_linked(
+    http: &reqwest::Client,
+    gate: &Gate,
+    id: &str,
+) -> Result<Linked, String> {
     let resource = format!("https://open.spotify.com/artist/{id}");
     let link = {
         let _turn = gate.wait().await;
@@ -144,22 +174,152 @@ async fn musicbrainz(http: &reqwest::Client, gate: &Gate, id: &str) -> Result<Ve
         )
         .await?
     };
-    let Some(artist) = link.and_then(|link| musicbrainz_artist(&link)) else {
-        return Ok(Vec::new());
+    let artist = link.and_then(|link| musicbrainz_artist(&link));
+    let genres = match &artist {
+        Some(artist) => musicbrainz_artist_genres(http, gate, artist).await?,
+        None => Vec::new(),
     };
-    let found = {
+    Ok(Linked { artist, genres })
+}
+
+/// Finds the artist by name, when exactly one is an unmistakable match.
+/// `already` is the artist the Spotify link gave, not worth asking twice.
+async fn musicbrainz_named(
+    http: &reqwest::Client,
+    gate: &Gate,
+    name: &str,
+    already: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let search = {
         let _turn = gate.wait().await;
         get_json(
-            http.get(format!("{MUSICBRAINZ}/artist/{artist}"))
-                .query(&[("inc", "genres"), ("fmt", "json")])
+            http.get(format!("{MUSICBRAINZ}/artist"))
+                .query(&[
+                    ("query", format!("artist:\"{}\"", escape_query(name)).as_str()),
+                    ("limit", "5"),
+                    ("fmt", "json"),
+                ])
                 .header("User-Agent", MUSICBRAINZ_AGENT),
             "MusicBrainz",
         )
         .await?
     };
+    let Some(found) = search.and_then(|search| musicbrainz_match(&search, name)) else {
+        return Ok(Vec::new());
+    };
+    if already == Some(found.as_str()) {
+        return Ok(Vec::new());
+    }
+    musicbrainz_artist_genres(http, gate, &found).await
+}
+
+/// The genres Wikidata lists for the artist with this Spotify ID. The ID is
+/// matched exactly, so no wrong artist can answer.
+async fn wikidata(http: &reqwest::Client, id: &str) -> Result<Vec<String>, String> {
+    // `id` was checked to be letters and digits only, so it cannot break out
+    // of the quoted string.
+    let query = format!(
+        "SELECT DISTINCT ?gLabel WHERE {{ ?a wdt:P1902 \"{id}\"; wdt:P136 ?g.          SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en\". }} }}"
+    );
+    let found = get_json(
+        http.get(WIKIDATA)
+            .query(&[("query", query.as_str()), ("format", "json")])
+            .header("User-Agent", MUSICBRAINZ_AGENT),
+        "Wikidata",
+    )
+    .await?;
     Ok(found
-        .map(|found| musicbrainz_genres(&found))
+        .map(|found| wikidata_genres(&found))
         .unwrap_or_default())
+}
+
+/// Wikidata's genre labels as the player bar wants them: "pop music" as
+/// "pop", "K-pop" as "k-pop".
+fn wikidata_genres(found: &serde_json::Value) -> Vec<String> {
+    let mut genres: Vec<String> = Vec::new();
+    for binding in found
+        .pointer("/results/bindings")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(label) = binding.pointer("/gLabel/value").and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let label = label.trim().to_lowercase();
+        let label = label
+            .strip_suffix(" music")
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(&label)
+            .to_string();
+        // An unlabelled item comes back as its Q-number.
+        let unlabelled = label.starts_with('q') && label[1..].chars().all(|c| c.is_ascii_digit());
+        if !label.is_empty() && !unlabelled && !genres.contains(&label) {
+            genres.push(label);
+        }
+    }
+    genres.truncate(KEEP);
+    genres
+}
+
+/// A MusicBrainz artist's genres, or its tags when it has no genres.
+async fn musicbrainz_artist_genres(
+    http: &reqwest::Client,
+    gate: &Gate,
+    artist: &str,
+) -> Result<Vec<String>, String> {
+    let _turn = gate.wait().await;
+    let found = get_json(
+        http.get(format!("{MUSICBRAINZ}/artist/{artist}"))
+            .query(&[("inc", "genres tags"), ("fmt", "json")])
+            .header("User-Agent", MUSICBRAINZ_AGENT),
+        "MusicBrainz",
+    )
+    .await?;
+    Ok(found
+        .map(|found| {
+            let genres = musicbrainz_genres(&found);
+            if genres.is_empty() {
+                musicbrainz_tags(&found)
+            } else {
+                genres
+            }
+        })
+        .unwrap_or_default())
+}
+
+/// Quotes and backslashes would end the phrase in a search query.
+fn escape_query(name: &str) -> String {
+    name.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// The one artist in a name search whose name is exactly `name` and whose
+/// score is near perfect. Two such artists share the name, so neither is
+/// safe to pick.
+fn musicbrainz_match(search: &serde_json::Value, name: &str) -> Option<String> {
+    let mut matches = search
+        .get("artists")?
+        .as_array()?
+        .iter()
+        .filter(|artist| {
+            artist
+                .get("score")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|score| score >= 95)
+                && artist
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|found| found.trim().eq_ignore_ascii_case(name))
+        })
+        .filter_map(|artist| artist.get("id")?.as_str())
+        .filter(|id| id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    let only = matches.next()?;
+    matches.next().is_none().then(|| only.to_string())
 }
 
 async fn lastfm(http: &reqwest::Client, key: &str, name: &str) -> Result<Vec<String>, String> {
@@ -216,15 +376,30 @@ fn musicbrainz_artist(link: &serde_json::Value) -> Option<String> {
 
 /// An artist's MusicBrainz genres, most voted first.
 fn musicbrainz_genres(artist: &serde_json::Value) -> Vec<String> {
+    musicbrainz_votes(artist, "genres", 1)
+}
+
+/// An artist's MusicBrainz tags that read as genres, for artists without
+/// any. Tags are looser: a tag needs a second vote.
+fn musicbrainz_tags(artist: &serde_json::Value) -> Vec<String> {
+    musicbrainz_votes(artist, "tags", 2)
+        .into_iter()
+        .filter(|tag| {
+            !LASTFM_IGNORED.contains(&tag.as_str()) && !tag.starts_with(|c: char| c.is_ascii_digit())
+        })
+        .collect()
+}
+
+fn musicbrainz_votes(artist: &serde_json::Value, field: &str, min: u64) -> Vec<String> {
     let mut genres: Vec<(u64, String)> = artist
-        .get("genres")
+        .get(field)
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|genre| {
             let count = genre.get("count")?.as_u64()?;
             let name = genre.get("name")?.as_str()?.trim().to_lowercase();
-            (count > 0 && !name.is_empty()).then_some((count, name))
+            (count >= min && !name.is_empty()).then_some((count, name))
         })
         .collect();
     // Stable, so equal votes keep MusicBrainz's order.
@@ -353,6 +528,48 @@ mod tests {
         assert_eq!(musicbrainz_genres(&artist), ["hip hop", "r&b", "pop rap"]);
         assert!(musicbrainz_genres(&json!({"genres": []})).is_empty());
         assert!(musicbrainz_genres(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_name_search_picks_only_an_unmistakable_match() {
+        let id = "9fff2f8a-21e6-47de-a2b8-7f449929d43f";
+        let one = json!({"artists": [
+            {"id": id, "name": "BLACKPINK", "score": 100},
+            {"id": "11111111-1111-1111-1111-111111111111", "name": "Blackpink Tribute", "score": 70},
+        ]});
+        assert_eq!(musicbrainz_match(&one, "Blackpink").as_deref(), Some(id));
+        let two = json!({"artists": [
+            {"id": id, "name": "KDA", "score": 100},
+            {"id": "11111111-1111-1111-1111-111111111111", "name": "kda", "score": 98},
+        ]});
+        assert_eq!(musicbrainz_match(&two, "KDA"), None);
+        let weak = json!({"artists": [{"id": id, "name": "KDA", "score": 80}]});
+        assert_eq!(musicbrainz_match(&weak, "KDA"), None);
+        assert_eq!(escape_query(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn wikidata_labels_read_as_genres() {
+        let found = json!({"results": {"bindings": [
+            {"gLabel": {"value": "hip-hop"}},
+            {"gLabel": {"value": "pop music"}},
+            {"gLabel": {"value": "K-pop"}},
+            {"gLabel": {"value": "Q123456"}},
+            {"gLabel": {"value": "Pop Music"}},
+        ]}});
+        assert_eq!(wikidata_genres(&found), ["hip-hop", "pop", "k-pop"]);
+        assert!(wikidata_genres(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn musicbrainz_tags_need_two_votes_and_read_as_genres() {
+        let artist = json!({"tags": [
+            {"name": "k-pop", "count": 9},
+            {"name": "seen live", "count": 5},
+            {"name": "american", "count": 1},
+            {"name": "2010s", "count": 4},
+        ]});
+        assert_eq!(musicbrainz_tags(&artist), ["k-pop"]);
     }
 
     #[test]

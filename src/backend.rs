@@ -731,6 +731,11 @@ pub enum Command {
     SetLastFmKey(crate::lyrics_ai::SecretKey),
     /// Fork: read which AI keys are saved, for the settings page.
     LoadAiKeys,
+    /// Fork: list the models a provider offers (src/lyrics_ai.rs).
+    ListAiModels {
+        provider: crate::lyrics_ai::Provider,
+        base_url: String,
+    },
     /// Fork: save a provider's AI key; an empty key removes it.
     SetAiKey {
         provider: crate::lyrics_ai::Provider,
@@ -1036,6 +1041,12 @@ pub enum Event {
     },
     /// Fork: which AI keys are saved, or why storing one failed.
     AiKeys(Result<crate::lyrics_ai::KeysPresent, String>),
+    /// Fork: the models a provider offers at an endpoint.
+    AiModels {
+        provider: crate::lyrics_ai::Provider,
+        base_url: String,
+        result: Result<Vec<crate::lyrics_ai::ModelChoice>, String>,
+    },
     /// Fork: a song's word-timed lines, `None` when there are none.
     WordTiming {
         uri: String,
@@ -1999,6 +2010,8 @@ struct Worker {
     ai_keys_loading: bool,
     /// Fork: extra-line requests waiting for the AI keys.
     ai_waiting: Vec<crate::lyrics_ai::Request>,
+    /// Fork: a model-list request waiting for the AI keys.
+    ai_models_waiting: Option<(crate::lyrics_ai::Provider, String)>,
     /// Fork: keys typed before the saved ones were read, applied after.
     ai_key_edits: Vec<(crate::lyrics_ai::KeyFor, crate::lyrics_ai::SecretKey)>,
     /// Genre lookups waiting for the saved keys, for the Last.fm one.
@@ -2107,6 +2120,7 @@ impl Worker {
             ai_keys: None,
             ai_keys_loading: false,
             ai_waiting: Vec::new(),
+            ai_models_waiting: None,
             ai_key_edits: Vec::new(),
             genres_waiting: Vec::new(),
             genre_gate: crate::genres::Gate::default(),
@@ -2811,6 +2825,9 @@ impl Worker {
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
                 Command::LyricsExtras(request) => self.fetch_lyrics_extras(*request),
                 Command::LoadAiKeys => self.load_ai_keys(),
+                Command::ListAiModels { provider, base_url } => {
+                    self.list_ai_models(provider, base_url);
+                }
                 Command::FindLyricsVideo(request) => self.find_lyrics_video(*request, None),
                 Command::FindWordTiming(request) => self.find_word_timing(*request),
                 Command::ChooseLyricsVideo(request, choice) => {
@@ -4983,6 +5000,29 @@ impl Worker {
         });
     }
 
+    fn list_ai_models(&mut self, provider: crate::lyrics_ai::Provider, base_url: String) {
+        let Some(keys) = self.ai_keys.clone() else {
+            self.ai_models_waiting = Some((provider, base_url));
+            self.load_ai_keys();
+            return;
+        };
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = match http {
+                Ok(http) => crate::lyrics_ai::list_models(&http, provider, &base_url, &keys).await,
+                Err(error) => Err(error),
+            };
+            let _ = events.send(Event::AiModels {
+                provider,
+                base_url,
+                result,
+            });
+            waker.wake();
+        });
+    }
+
     fn load_ai_keys(&mut self) {
         if let Some(keys) = &self.ai_keys {
             self.emit(Event::AiKeys(Ok(keys.present())));
@@ -5028,6 +5068,9 @@ impl Worker {
         }
         for request in std::mem::take(&mut self.ai_waiting) {
             self.fetch_lyrics_extras(request);
+        }
+        if let Some((provider, base_url)) = self.ai_models_waiting.take() {
+            self.list_ai_models(provider, base_url);
         }
     }
 

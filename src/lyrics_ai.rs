@@ -61,6 +61,11 @@ pub struct AiSettings {
     pub gemini_model: String,
     pub openai_base_url: String,
     pub openai_model: String,
+    /// The model picker lists only models the provider offers free.
+    pub free_models_only: bool,
+    /// When the chosen provider fails, ask the other one (if its key is
+    /// saved) with its own model.
+    pub fallback: bool,
 }
 
 impl Default for AiSettings {
@@ -73,11 +78,29 @@ impl Default for AiSettings {
             gemini_model: DEFAULT_GEMINI_MODEL.into(),
             openai_base_url: DEFAULT_OPENAI_BASE_URL.into(),
             openai_model: DEFAULT_OPENAI_MODEL.into(),
+            free_models_only: false,
+            fallback: true,
         }
     }
 }
 
 impl AiSettings {
+    /// The other provider, with the model and endpoint chosen for it.
+    pub fn alternative(&self) -> Alternative {
+        match self.provider {
+            Provider::Gemini => Alternative {
+                provider: Provider::OpenAiCompatible,
+                model: self.openai_model.trim().to_string(),
+                base_url: self.openai_base_url.trim().to_string(),
+            },
+            Provider::OpenAiCompatible => Alternative {
+                provider: Provider::Gemini,
+                model: self.gemini_model.trim().to_string(),
+                base_url: GEMINI_BASE_URL.to_string(),
+            },
+        }
+    }
+
     pub fn model(&self) -> &str {
         match self.provider {
             Provider::Gemini => self.gemini_model.trim(),
@@ -602,6 +625,27 @@ pub struct State {
     pub keys: Option<KeysPresent>,
     /// Why a key could not be stored or read.
     pub key_error: Option<String>,
+    /// The models last fetched, and the provider and endpoint they came from.
+    pub models: Option<ModelList>,
+    /// A model list is on its way for this provider and endpoint.
+    pub models_loading: Option<(Provider, String)>,
+    /// Why the last model fetch failed, with what it was for.
+    pub models_error: Option<(Provider, String, String)>,
+}
+
+/// A provider's models, for the settings page's picker.
+pub struct ModelList {
+    pub provider: Provider,
+    pub base_url: String,
+    pub models: Vec<ModelChoice>,
+}
+
+/// One model a provider offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub id: String,
+    /// The provider lists it at no cost.
+    pub free: bool,
 }
 
 impl State {
@@ -868,6 +912,16 @@ pub struct Request {
     pub provider: Provider,
     pub model: String,
     pub base_url: String,
+    /// Tried in order when the first provider fails.
+    pub fallbacks: Vec<Alternative>,
+}
+
+/// Another provider and model to ask when the first one fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alternative {
+    pub provider: Provider,
+    pub model: String,
+    pub base_url: String,
 }
 
 impl Request {
@@ -1014,10 +1068,6 @@ pub async fn fetch(
         log::debug!("lyrics extras for {}: from the cache", request.uri);
         return Ok(cached);
     }
-    let key = keys.get(request.provider);
-    if key.is_empty() {
-        return Err(Error::NoKey);
-    }
     let distinct = request.distinct();
     if distinct.is_empty() {
         return Ok(Extras {
@@ -1025,35 +1075,88 @@ pub async fn fetch(
         });
     }
     let (system, user) = prompt(request, &distinct);
-    log::info!(
-        "lyrics extras for {}: asking {} ({}) about {} lines",
-        request.uri,
-        request.provider.label(),
-        request.model,
-        distinct.len()
-    );
-    let text = match request.provider {
-        Provider::Gemini => gemini(http, request, key, &system, &user).await,
-        Provider::OpenAiCompatible => openai(http, request, key, &system, &user).await,
+    // The chosen provider first, then each fallback that has a key.
+    let mut attempts = vec![request.clone()];
+    for alternative in &request.fallbacks {
+        if keys.get(alternative.provider).is_empty() {
+            continue;
+        }
+        attempts.push(Request {
+            provider: alternative.provider,
+            model: alternative.model.clone(),
+            base_url: alternative.base_url.clone(),
+            fallbacks: Vec::new(),
+            ..request.clone()
+        });
     }
-    .map_err(|message| Error::Failed(scrub(&message, key)))?;
-    let parsed = parse(&text, distinct.len()).map_err(|error| {
-        // Lyrics and the model's words only, never the key.
-        let head: String = text.chars().take(300).collect();
-        let tail: String = {
-            let mut tail: Vec<char> = text.chars().rev().take(300).collect();
-            tail.reverse();
-            tail.into_iter().collect()
-        };
-        log::debug!(
-            "lyrics extras answer unreadable ({} chars): {head:?} … {tail:?}",
-            text.chars().count()
+    let mut failure = None;
+    let mut parsed = None;
+    for attempt in &attempts {
+        let key = keys.get(attempt.provider);
+        if key.is_empty() {
+            failure.get_or_insert(Error::NoKey);
+            continue;
+        }
+        log::info!(
+            "lyrics extras for {}: asking {} ({}) about {} lines",
+            request.uri,
+            attempt.provider.label(),
+            attempt.model,
+            distinct.len()
         );
-        Error::Failed(error)
-    })?;
+        let text = match attempt.provider {
+            Provider::Gemini => gemini(http, attempt, key, &system, &user).await,
+            Provider::OpenAiCompatible => openai(http, attempt, key, &system, &user).await,
+        };
+        let text = match text {
+            Ok(text) => text,
+            Err(message) => {
+                log::warn!(
+                    "{} failed: {}",
+                    attempt.provider.label(),
+                    scrub(&message, key)
+                );
+                failure = Some(Error::Failed(scrub(&message, key)));
+                continue;
+            }
+        };
+        match parse(&text, distinct.len()) {
+            Ok(answer) => {
+                parsed = Some(answer);
+                break;
+            }
+            Err(error) => {
+                // Lyrics and the model's words only, never the key.
+                let head: String = text.chars().take(300).collect();
+                log::debug!(
+                    "lyrics extras answer unreadable ({} chars): {head:?}",
+                    text.chars().count()
+                );
+                failure = Some(Error::Failed(error));
+            }
+        }
+    }
+    let Some(parsed) = parsed else {
+        return Err(failure.unwrap_or(Error::NoKey));
+    };
     let extras = spread(request, &distinct, parsed);
     write_cache(&path, &extras);
     Ok(extras)
+}
+
+/// A request error with every cause in its chain, so "error sending
+/// request" says whether it was DNS, TLS or a refused connection.
+fn describe(error: reqwest::Error) -> String {
+    use std::error::Error as _;
+    let error = error.without_url();
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// Never let a key a provider echoes reach the interface or the log.
@@ -1195,6 +1298,100 @@ async fn answer(response: reqwest::Response, who: &str) -> Result<serde_json::Va
         .map(|message| format!(": {message}"))
         .unwrap_or_default();
     Err(format!("{who} answered {status}{detail}"))
+}
+
+/// The models `provider` offers at `base_url` for this key, sorted. Gemini
+/// lists only those that can generate text.
+pub async fn list_models(
+    http: &reqwest::Client,
+    provider: Provider,
+    base_url: &str,
+    keys: &Keys,
+) -> Result<Vec<ModelChoice>, String> {
+    let key = keys.get(provider);
+    if key.is_empty() {
+        return Err("save an API key first".into());
+    }
+    let base = base_url.trim().trim_end_matches('/');
+    let mut models = match provider {
+        Provider::Gemini => {
+            let response = http
+                .get(format!("{base}/models?pageSize=1000"))
+                .header("x-goog-api-key", key)
+                .timeout(Duration::from_secs(20))
+                .send()
+                .await
+                .map_err(|error| format!("cannot reach Gemini: {}", describe(error)))?;
+            let json = answer(response, "Gemini")
+                .await
+                .map_err(|message| scrub(&message, key))?;
+            json.get("models")
+                .and_then(|models| models.as_array())
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter(|model| {
+                            model
+                                .get("supportedGenerationMethods")
+                                .and_then(|methods| methods.as_array())
+                                .is_none_or(|methods| {
+                                    methods.iter().any(|m| m.as_str() == Some("generateContent"))
+                                })
+                        })
+                        .filter_map(|model| model.get("name").and_then(|name| name.as_str()))
+                        .map(|name| ModelChoice {
+                            id: name.trim_start_matches("models/").to_string(),
+                            // Google prices by model and tier; the key page
+                            // says what the free tier covers.
+                            free: false,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        }
+        Provider::OpenAiCompatible => {
+            let response = http
+                .get(format!("{base}/models"))
+                .bearer_auth(key)
+                .timeout(Duration::from_secs(20))
+                .send()
+                .await
+                .map_err(|error| format!("cannot reach {base}: {}", describe(error)))?;
+            let json = answer(response, "the AI provider")
+                .await
+                .map_err(|message| scrub(&message, key))?;
+            json.get("data")
+                .and_then(|data| data.as_array())
+                .map(|data| {
+                    data.iter()
+                        .filter_map(|model| {
+                            let id = model.get("id")?.as_str()?;
+                            // OpenRouter prices every model; ":free" ones and
+                            // zero-priced ones cost nothing.
+                            let zero = |field: &str| {
+                                model
+                                    .pointer(&format!("/pricing/{field}"))
+                                    .and_then(|price| price.as_str())
+                                    .and_then(|price| price.parse::<f64>().ok())
+                                    == Some(0.0)
+                            };
+                            let free = id.ends_with(":free") || (zero("prompt") && zero("completion"));
+                            Some(ModelChoice {
+                                id: id.to_string(),
+                                free,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        }
+    };
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    if models.is_empty() {
+        return Err("the provider listed no models".into());
+    }
+    Ok(models)
 }
 
 // ---- answers ---------------------------------------------------------------
@@ -1461,6 +1658,7 @@ mod tests {
 
     fn request(lines: &[&str], wanted: Wanted) -> Request {
         Request {
+            fallbacks: Vec::new(),
             uri: "spotify:track:abc".into(),
             title: "Song".into(),
             artist: "Artist".into(),

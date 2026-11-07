@@ -563,6 +563,12 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
         }
         ui.add_space(8.0);
     }
+    let provider_now = ai.provider;
+    let base_url = ai.base_url().to_string();
+    let free_setting = ai.free_models_only;
+    let mut free_toggled: Option<bool> = None;
+    let mut fallback_toggled: Option<bool> = None;
+    let fallback_setting = ai.fallback;
     let model = match ai.provider {
         Provider::Gemini => &mut ai.gemini_model,
         Provider::OpenAiCompatible => &mut ai.openai_model,
@@ -571,17 +577,201 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
         Provider::Gemini => crate::lyrics_ai::DEFAULT_GEMINI_MODEL,
         Provider::OpenAiCompatible => crate::lyrics_ai::DEFAULT_OPENAI_MODEL,
     };
-    if widgets::labeled_field(
+    let key_saved = app
+        .lyrics_ai
+        .keys
+        .is_some_and(|keys| keys.has(provider_now));
+    let fetched = app.lyrics_ai.models.as_ref().filter(|list| {
+        list.provider == provider_now && list.base_url == base_url
+    });
+    let loading = app.lyrics_ai.models_loading.as_ref() == Some(&(provider_now, base_url.clone()));
+    let failed = app
+        .lyrics_ai
+        .models_error
+        .as_ref()
+        .filter(|(p, url, _)| *p == provider_now && *url == base_url)
+        .map(|(_, _, error)| error.clone());
+    // Ask once for the list when a key is there to ask with.
+    if key_saved && fetched.is_none() && !loading && failed.is_none() {
+        app.actions.push(Action::ListAiModels {
+            provider: provider_now,
+            base_url: base_url.clone(),
+        });
+    }
+    if let Some(list) = fetched {
+        ui.label(
+            egui::RichText::new(gettext(locale, "Model"))
+                .font(theme::medium(13.0))
+                .color(palette.secondary),
+        );
+        ui.add_space(4.0);
+        let free_tag = gettext(locale, "free");
+        // Only offered when the provider says which models are free.
+        let any_free = list.models.iter().any(|choice| choice.free);
+        let mut free_only = any_free && free_setting;
+        let selected = if model.trim().is_empty() {
+            model_hint.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("lyrics_ai_model", provider_now.label()))
+                .selected_text(selected)
+                .width((ui.available_width() - 90.0).clamp(120.0, 320.0))
+                .height(400.0)
+                .show_ui(ui, |ui| {
+                    // Free ones first, when the provider says which are.
+                    let mut choices: Vec<&crate::lyrics_ai::ModelChoice> =
+                        list.models.iter().filter(|choice| choice.free || !free_only).collect();
+                    choices.sort_by_key(|choice| !choice.free);
+                    for choice in choices {
+                        let label = if choice.free {
+                            format!("{}  ({free_tag})", choice.id)
+                        } else {
+                            choice.id.clone()
+                        };
+                        if ui
+                            .selectable_label(model.trim() == choice.id, label)
+                            .clicked()
+                            && model.trim() != choice.id
+                        {
+                            *model = choice.id.clone();
+                            changed = true;
+                        }
+                    }
+                });
+            if theme::soft_button(ui, palette, None, &gettext(locale, "Refresh"), false).clicked() {
+                app.actions.push(Action::ListAiModels {
+                    provider: provider_now,
+                    base_url: base_url.clone(),
+                });
+            }
+        });
+        if any_free {
+            ui.add_space(6.0);
+            let toggled = ui
+                .horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(gettext(locale, "Free models only"))
+                            .font(theme::regular(13.0))
+                            .color(palette.text),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        widgets::switch(
+                            ui,
+                            palette,
+                            &gettext(locale, "Free models only"),
+                            &mut free_only,
+                        )
+                        .changed()
+                    })
+                    .inner
+                })
+                .inner;
+            if toggled {
+                free_toggled = Some(free_only);
+                ui.ctx().request_repaint();
+            }
+            ui.add_space(2.0);
+        }
+        if list.models.iter().any(|choice| choice.free) {
+            wrapped_hint(
+                ui,
+                gettext(locale, "Models marked free cost nothing to use."),
+                theme::regular(12.0),
+                palette.secondary,
+            );
+        } else if provider_now == Provider::Gemini {
+            wrapped_hint(
+                ui,
+                gettext(
+                    locale,
+                    "Google AI Studio keys have a free tier; Flash models are usually covered.",
+                ),
+                theme::regular(12.0),
+                palette.secondary,
+            );
+        }
+    } else {
+        if widgets::labeled_field(
+            ui,
+            palette,
+            locale,
+            &gettext(locale, "Model"),
+            model,
+            model_hint,
+            false,
+        )
+        .changed()
+        {
+            changed = true;
+        }
+        if loading {
+            wrapped_hint(
+                ui,
+                gettext(locale, "Fetching models…"),
+                theme::regular(12.0),
+                palette.secondary,
+            );
+        } else if key_saved {
+            if let Some(error) = &failed {
+                wrapped_hint(ui, error, theme::regular(12.0), palette.danger);
+            }
+            if theme::soft_button(ui, palette, None, &gettext(locale, "Fetch models"), false)
+                .clicked()
+            {
+                app.actions.push(Action::ListAiModels {
+                    provider: provider_now,
+                    base_url: base_url.clone(),
+                });
+            }
+        } else {
+            wrapped_hint(
+                ui,
+                gettext(locale, "Save an API key to pick from the provider's models."),
+                theme::regular(12.0),
+                palette.secondary,
+            );
+        }
+    }
+    ui.add_space(8.0);
+
+    if let Some(on) = free_toggled {
+        ai.free_models_only = on;
+        changed = true;
+    }
+    // If this provider fails (quota, outage), ask the other one.
+    let mut fallback = fallback_setting;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(gettext(locale, "Fall back to other models"))
+                .font(theme::regular(13.0))
+                .color(palette.text),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::switch(
+                ui,
+                palette,
+                &gettext(locale, "Fall back to other models"),
+                &mut fallback,
+            )
+            .changed()
+            {
+                fallback_toggled = Some(fallback);
+            }
+        });
+    });
+    wrapped_hint(
         ui,
-        palette,
-        locale,
-        &gettext(locale, "Model"),
-        model,
-        model_hint,
-        false,
-    )
-    .changed()
-    {
+        gettext(
+            locale,
+            "If a request fails, try other free models (with the free filter on), then the other provider if its key is saved. Your lyrics go to each one tried.",
+        ),
+        theme::regular(12.0),
+        palette.secondary,
+    );
+    if let Some(on) = fallback_toggled {
+        ai.fallback = on;
         changed = true;
     }
     ui.add_space(8.0);
@@ -653,4 +843,14 @@ pub(super) fn provider_and_key(app: &mut App, ui: &mut egui::Ui, palette: &Palet
         theme::text(ui, error, theme::regular(12.5), palette.danger);
     }
     changed
+}
+
+/// A small note that wraps inside the narrow panel instead of running off it.
+fn wrapped_hint(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    font: egui::FontId,
+    color: egui::Color32,
+) {
+    ui.add(egui::Label::new(egui::RichText::new(text.into()).font(font).color(color)).wrap());
 }

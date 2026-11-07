@@ -94,8 +94,12 @@ the mods webview. The fork rebuilds the ones worth keeping natively:
   (`src/genres.rs`, `Command::ArtistGenres`) finds the artist on
   [MusicBrainz](https://musicbrainz.org) by its Spotify URL and takes its
   most voted genres, one request a second as MusicBrainz asks. When
-  MusicBrainz has none and a Last.fm API key is saved, Last.fm's top tags
-  for the artist's name fill in, with tags such as "seen live" left out.
+  MusicBrainz has none, [Wikidata](https://www.wikidata.org) is asked for
+  the artist with the same Spotify ID (property P1902, genre P136), then
+  MusicBrainz is searched by name, taking only a single exact-name match
+  with a near-perfect score (its genres, or tags with two votes). When
+  none has any and a Last.fm API key is saved, Last.fm's top tags for the
+  artist's name fill in, with tags such as "seen live" left out.
   Answers are kept in `genres` in the cache folder for 30 days (misses for
   3, or until a Last.fm key is saved); a failed lookup is tried again after
   five minutes. When nobody knows the artist the line is hidden. Settings →
@@ -113,7 +117,13 @@ alphabet and a translation line, smaller and dimmer, following the
 highlight and autoscroll. Settings, under **Lyrics translation**: both
 switches, the target language (default: the interface language), the
 provider (Gemini, or any OpenAI-compatible endpoint: OpenRouter, OpenAI,
-Groq) with its model, and the API key.
+Groq) with its model, and the API key. With a key saved the model is
+picked from the provider's own list (Gemini `models`, OpenAI-compatible
+`/models`), with a switch to show only free models (OpenRouter marks
+them) that is kept in the settings. **Fall back to other models** (on by
+default): when a request fails, the other free models of that list are
+tried (up to four, with the free filter on), then the other provider with
+its own model, if its key is saved. Lyrics go to each one tried.
 
 - One request per song with every distinct line (a chorus is sent once),
   asking for strict JSON: `{"language", "lines": [{"i", "pronunciation",

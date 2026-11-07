@@ -3120,6 +3120,29 @@ impl App {
                     }
                     Err(error) => self.lyrics_ai.key_error = Some(error),
                 },
+                Event::AiModels {
+                    provider,
+                    base_url,
+                    result,
+                } => {
+                    if self.lyrics_ai.models_loading.as_ref() == Some(&(provider, base_url.clone()))
+                    {
+                        self.lyrics_ai.models_loading = None;
+                    }
+                    match result {
+                        Ok(models) => {
+                            self.lyrics_ai.models_error = None;
+                            self.lyrics_ai.models = Some(crate::lyrics_ai::ModelList {
+                                provider,
+                                base_url,
+                                models,
+                            });
+                        }
+                        Err(error) => {
+                            self.lyrics_ai.models_error = Some((provider, base_url, error));
+                        }
+                    }
+                }
                 Event::PlaylistCache {
                     account_id,
                     id,
@@ -4643,6 +4666,7 @@ impl App {
             provider: settings.provider,
             model: settings.model().to_string(),
             base_url: settings.base_url().to_string(),
+            fallbacks: self.lyrics_ai_fallbacks(&settings),
         };
         let id = request.id();
         if self.lyrics_ai.id.as_deref() == Some(id.as_str()) {
@@ -4650,6 +4674,43 @@ impl App {
         }
         self.lyrics_ai.id = Some(id);
         self.backend.send(Command::LyricsExtras(Box::new(request)));
+    }
+
+    /// Fork: what to try when the chosen model fails. With the free-models
+    /// filter on, the other free models just fetched for this provider come
+    /// first (a few, in list order), then the other provider.
+    fn lyrics_ai_fallbacks(
+        &self,
+        settings: &crate::lyrics_ai::AiSettings,
+    ) -> Vec<crate::lyrics_ai::Alternative> {
+        const FREE_TRIES: usize = 4;
+        if !settings.fallback {
+            return Vec::new();
+        }
+        let mut chain = Vec::new();
+        if settings.free_models_only {
+            let base_url = settings.base_url();
+            if let Some(list) = self
+                .lyrics_ai
+                .models
+                .as_ref()
+                .filter(|list| list.provider == settings.provider && list.base_url == base_url)
+            {
+                chain.extend(
+                    list.models
+                        .iter()
+                        .filter(|choice| choice.free && choice.id != settings.model())
+                        .take(FREE_TRIES)
+                        .map(|choice| crate::lyrics_ai::Alternative {
+                            provider: settings.provider,
+                            model: choice.id.clone(),
+                            base_url: base_url.to_string(),
+                        }),
+                );
+            }
+        }
+        chain.push(settings.alternative());
+        chain
     }
 
     /// Fork: asks Unison for the playing lyrics' word timing, once per
@@ -13866,6 +13927,15 @@ impl App {
                 self.request_lyrics_extras();
             }
             Action::LoadAiKeys => self.backend.send(Command::LoadAiKeys),
+            Action::ListAiModels { provider, base_url } => {
+                let wanted = (provider, base_url.clone());
+                if self.lyrics_ai.models_loading.as_ref() != Some(&wanted) {
+                    self.lyrics_ai.models_loading = Some(wanted);
+                    self.lyrics_ai.models_error = None;
+                    self.backend
+                        .send(Command::ListAiModels { provider, base_url });
+                }
+            }
             Action::SaveLastFmKey(key) => self.backend.send(Command::SetLastFmKey(key)),
             Action::SaveAiKey { provider, key } => {
                 self.backend.send(Command::SetAiKey { provider, key });

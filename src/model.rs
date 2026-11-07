@@ -1374,6 +1374,11 @@ pub enum Action {
     RetryLyricsExtras,
     /// Fork: ask which AI keys are saved (src/lyrics_ai.rs).
     LoadAiKeys,
+    /// Fork: list the models a provider offers at an endpoint.
+    ListAiModels {
+        provider: crate::lyrics_ai::Provider,
+        base_url: String,
+    },
     /// Fork: save an AI provider's key; empty removes it.
     SaveAiKey {
         provider: crate::lyrics_ai::Provider,
