@@ -319,12 +319,39 @@ fn line(ui: &mut egui::Ui, text: &str, font: FontId, color: Color32) -> Rect {
 /// Why the extra lines are missing, quietly, above the lyrics, with a way
 /// to ask again.
 pub(super) fn notice(app: &mut App, ui: &mut egui::Ui, color: Color32) {
-    let Some(error) = &app.lyrics_ai.error else {
-        return;
-    };
     if app.lyrics_ai.uri != app.lyrics_uri {
         return;
     }
+    // A spinner each for the translation and the pronunciation still on
+    // their way, as the settings still want them.
+    if let Some(pending) = app.lyrics_ai.pending {
+        let settings = &app.settings.lyrics_ai;
+        let waiting = [
+            (
+                pending.translation && settings.translate,
+                gettext(app.locale, "Translating…"),
+            ),
+            (
+                pending.pronunciation && settings.pronounce,
+                gettext(app.locale, "Working out pronunciation…"),
+            ),
+        ];
+        for (on, label) in waiting {
+            if on {
+                ui.horizontal(|ui| {
+                    theme::spinner(ui, 14.0, color);
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(label.as_ref())
+                            .font(theme::regular(12.0))
+                            .color(color),
+                    ));
+                });
+            }
+        }
+    }
+    let Some(error) = &app.lyrics_ai.error else {
+        return;
+    };
     let message = gettext(
         app.locale,
         // Translators: Keep {error} unchanged. It is the original failure detail.

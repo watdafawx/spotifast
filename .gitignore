@@ -13,3 +13,6 @@ docs/.bundle/
 /.cache/
 
 /dist/
+
+# Local research notes
+/docs/research/

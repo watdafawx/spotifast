@@ -621,6 +621,9 @@ pub struct State {
     pub error: Option<String>,
     /// The last request found no key, so a new key asks again.
     pub unanswered: bool,
+    /// What the request now on its way will bring, for the loading
+    /// spinners; `None` once it has answered or failed.
+    pub pending: Option<Wanted>,
     /// Which keys are saved, once the backend has said.
     pub keys: Option<KeysPresent>,
     /// Why a key could not be stored or read.

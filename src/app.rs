@@ -4630,6 +4630,7 @@ impl App {
             self.lyrics_ai.extras = None;
             self.lyrics_ai.error = None;
             self.lyrics_ai.unanswered = false;
+            self.lyrics_ai.pending = None;
         }
         let settings = &self.settings.lyrics_ai;
         if lyrics.instrumental
@@ -4673,6 +4674,7 @@ impl App {
             return;
         }
         self.lyrics_ai.id = Some(id);
+        self.lyrics_ai.pending = Some(wanted);
         self.backend.send(Command::LyricsExtras(Box::new(request)));
     }
 
@@ -4791,6 +4793,7 @@ impl App {
         if self.lyrics_ai.id.as_deref() != Some(id) {
             return;
         }
+        self.lyrics_ai.pending = None;
         match result {
             Ok(extras) => {
                 self.lyrics_ai.extras = Some(extras);
