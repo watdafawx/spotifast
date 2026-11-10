@@ -1,0 +1,206 @@
+# Fork only: put the fork's commits back on top of crmne/spotifast every day.
+#
+# The fork is a stack of patches on upstream/main, not a merge history
+# (FORK.md, "Keeping up with upstream"). Each day:
+#
+# rebase (Linux): cherry-picks the fork's commits onto the new upstream/main
+# with Mergiraf, a merge driver that understands Rust, TOML and YAML syntax,
+# so edits that only sit near each other merge on their own. No LLM is
+# involved. The fork's commits never touch Cargo.lock: the lockfile is
+# upstream's, and cargo adds the fork's crates back in one commit of its own
+# at the top of the stack. The result goes to sync/upstream.
+#
+# verify (Windows, where the mods code compiles): builds with mods and runs
+# the tests. Only then does mods move, and its previous state is kept on
+# mods-previous.
+#
+# Any failure leaves mods where it was and opens (or comments on) an issue
+# labelled `sync`, so nothing changes until someone fixes the conflict by hand
+# (FORK.md says how). When upstream changes a function the fork keeps its own
+# copy of, an issue says so, so the copy can catch up; the sync goes on.
+#
+# Needs the SYNC_TOKEN secret whenever upstream changes .github/workflows/:
+# GitHub refuses a push touching workflow files from GITHUB_TOKEN, and no
+# `permissions:` entry lifts that. Use a fine-grained personal access token
+# for this repository with Contents and Workflows set to read and write.
+# Without it the jobs fall back to GITHUB_TOKEN, which covers every other sync.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  # The subject of the stack's top commit, which only holds Cargo.lock.
+  LOCK_SUBJECT: "Cargo.lock for the fork's crates (fork)"
+  MERGIRAF_VERSION: "0.20.0"
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.rebase.outputs.result }}
+      before: ${{ steps.rebase.outputs.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: mods
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/mergiraf
+          key: mergiraf-${{ env.MERGIRAF_VERSION }}
+
+      - name: Install Mergiraf
+        run: |
+          command -v mergiraf || cargo install --locked mergiraf --version "$MERGIRAF_VERSION"
+          mergiraf --version
+
+      - name: Rebase the fork onto upstream
+        id: rebase
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/crmne/spotifast
+          git fetch upstream main
+          echo "before=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "mods already has everything on upstream/main." >> "$GITHUB_STEP_SUMMARY"
+            echo "result=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          old_base=$(git merge-base HEAD upstream/main)
+          echo "old_base=$old_base" >> "$GITHUB_OUTPUT"
+
+          # Mergiraf for the files it understands; git's own merge for the rest.
+          git config merge.mergiraf.name mergiraf
+          git config merge.mergiraf.driver 'mergiraf merge --git %O %A %B -s %S -x %X -y %Y -p %P -l %L'
+          printf '%s merge=mergiraf\n' '*.rs' '*.toml' '*.yml' '*.yaml' > .git/info/attributes
+          git config merge.conflictStyle diff3
+
+          stack=$(git rev-list --reverse --no-merges "$old_base..HEAD")
+          git checkout -B sync upstream/main
+          for commit in $stack; do
+            subject=$(git log -1 --format=%s "$commit")
+            if [ "$subject" = "$LOCK_SUBJECT" ]; then
+              continue
+            fi
+            if ! git cherry-pick --empty=drop "$commit"; then
+              {
+                echo "### Conflict"
+                echo
+                echo "Cherry-picking \`$(git log -1 --format='%h %s' "$commit")\` onto upstream \`$(git rev-parse --short upstream/main)\` conflicts in:"
+                echo
+                git diff --name-only --diff-filter=U | sed 's/^/- /'
+                echo
+                echo '```diff'
+                git diff | head -200
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              git cherry-pick --abort
+              exit 1
+            fi
+          done
+
+          # The lockfile: upstream's, plus whatever the fork's crates need.
+          cargo metadata --features mods --format-version 1 > /dev/null
+          if ! git diff --quiet Cargo.lock; then
+            git add Cargo.lock
+            git commit -m "$LOCK_SUBJECT"
+          fi
+          {
+            echo "Rebased $(echo "$stack" | wc -w) fork commits onto upstream \`$(git rev-parse --short upstream/main)\`:"
+            echo '```'
+            git log --oneline upstream/main..HEAD
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "result=rebased" >> "$GITHUB_OUTPUT"
+          git push --force origin HEAD:refs/heads/sync/upstream
+
+      # The fork keeps its own copies of a few upstream functions (FORK.md,
+      # "Copied functions"). When upstream changes one, say so; the copy
+      # still works, it just misses upstream's change until it is ported.
+      - name: Upstream changes to copied functions
+        if: steps.rebase.outputs.result == 'rebased'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD_BASE: ${{ steps.rebase.outputs.old_base }}
+        run: |
+          report=""
+          # file|the line that starts the function, as a regex
+          while IFS='|' read -r file start; do
+            [ -n "$file" ] || continue
+            changes=$(git log --format='%h %s' -L ":$start:$file" "$OLD_BASE..upstream/main" 2>/dev/null \
+              | grep -E '^[0-9a-f]{7,40} ' || true)
+            if [ -n "$changes" ]; then
+              report+=$'\n'"**\`$file\` \`$start\`**"$'\n'"$(echo "$changes" | sed 's/^/- /')"$'\n'
+            fi
+          done <<'COPIED'
+          src/ui/lyrics.rs|^fn contents[(]
+          src/ui/lyrics.rs|^fn fullscreen_contents[(]
+          src/ui/lyrics.rs|^fn background[(]
+          src/ui/sidebar.rs|^pub fn show[(]
+          src/ui/sidebar.rs|^fn contents[(]
+          src/ui/widgets.rs|^pub fn thin_slider[(]
+          COPIED
+          if [ -z "$report" ]; then
+            exit 0
+          fi
+          body="Upstream changed functions the fork keeps its own copy of (FORK.md, \"Copied functions\"). The fork still builds and runs; port these changes into the fork's copies when convenient."$'\n'"$report"
+          echo "$body" >> "$GITHUB_STEP_SUMMARY"
+          gh label create sync --color BFD4F2 --description "Upstream sync" 2>/dev/null || true
+          gh issue create --title "Upstream changed copied functions ($(date -u +%F))" --label sync --body "$body"
+
+  verify:
+    needs: rebase
+    if: needs.rebase.outputs.result == 'rebased'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sync/upstream
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Build and test
+        run: |
+          cargo build --locked --no-default-features --features mods
+          cargo test --locked --no-default-features --features mods,demo --lib
+
+      - name: Move mods
+        shell: bash
+        env:
+          BEFORE: ${{ needs.rebase.outputs.before }}
+        run: |
+          # Keep the previous mods as a recovery point, then move mods only if
+          # nobody pushed to it while this ran.
+          git push --force origin "$BEFORE:refs/heads/mods-previous"
+          git push --force-with-lease="mods:$BEFORE" origin HEAD:mods
+          git push origin --delete sync/upstream
+
+  report:
+    needs: [rebase, verify]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or update the sync issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Upstream sync failed"
+          gh label create sync --repo "$GITHUB_REPOSITORY" --color BFD4F2 --description "Upstream sync" 2>/dev/null || true
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label sync --search "in:title \"$title\"" --json number --jq '.[0].number')
+          body="The daily sync could not put the fork on top of upstream: $RUN. \`mods\` stays where it was. FORK.md, \"When the sync fails\", says how to fix it."
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "Failed again: $RUN"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label sync --body "$body"
+          fi
