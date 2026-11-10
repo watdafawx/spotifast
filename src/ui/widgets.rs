@@ -3283,6 +3283,9 @@ pub fn wheel_notches(ui: &Ui, response: &egui::Response) -> i32 {
     notches as i32
 }
 
+/// Fork: the waveform seek bar's slider (FORK.md).
+pub mod fork;
+
 /// A thin horizontal slider whose handle appears on hover, for seeking and
 /// volume. `value` is 0..=1.
 pub fn thin_slider(

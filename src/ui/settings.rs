@@ -135,6 +135,9 @@ const RELEASE_NOTES_URL: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
+/// Fork: the fork's rows and sections (FORK.md).
+mod fork;
+
 fn section_matches(needle: &str, title: &str, rows: &[RowText<'_>]) -> bool {
     let needle = needle.trim().to_lowercase();
     rows.iter().any(|row| row.matches(&needle, title))
@@ -1589,6 +1592,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 },
             );
+            changed |= fork::appearance(app, ui, &palette, &needle, &appearance);
             filtered_row(
                 ui,
                 &palette,
@@ -1787,6 +1791,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
         });
     }
+
+    changed |= fork::sections(app, ui, &palette, &needle, &mut any_visible);
 
     let skins_folder = app.dirs.skins_dir();
     app.winamp.poll_choices();
@@ -2558,6 +2564,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         .open_url(egui::OpenUrl::new_tab(env!("CARGO_PKG_REPOSITORY")));
                 }
             });
+            fork::updates_link(app, ui, &palette);
             ui.add_space(14.0);
             if widgets::credit(ui, &palette, locale) {
                 app.actions

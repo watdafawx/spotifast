@@ -1374,6 +1374,8 @@ pub enum Action {
     FollowLyrics,
     PauseLyricsFollow,
     RetryLyrics,
+    /// Fork: the fork's own actions (src/fork).
+    Fork(crate::fork::Action),
     ToggleDevicesPopup,
     /// Ask GitHub for the latest release and report the result to the user.
     CheckForUpdates,

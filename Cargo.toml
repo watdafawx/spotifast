@@ -124,6 +124,8 @@ projectm-sys = { version = "1.2.2", default-features = false, features = ["stati
 winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }
 glutin-winit = { version = "0.5", optional = true }
+# Fork: the mods window's webview (WebView2 on Windows), in its own process.
+wry = { version = "0.57", default-features = false, optional = true }
 # Detect the live window backend, including when MilkDrop is disabled.
 # eframe already compiles this crate.
 raw-window-handle = "0.6"
@@ -139,6 +141,9 @@ librespot-core = { version = "0.8", default-features = false, features = ["rustl
 librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-connect = { version = "0.8", default-features = false }
 librespot-metadata = { version = "0.8", default-features = false }
+# Decrypts a song librespot already cached, for the waveform seek bar
+# (src/fork/seekwave.rs). Already in the tree through librespot-playback.
+librespot-audio = { version = "0.8", default-features = false }
 librespot-protocol = { version = "0.8", default-features = false }
 # Parses the rootlist's playlist4 protobuf, the same crate librespot generates with.
 protobuf = "3"
@@ -244,6 +249,12 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # compiles this version.
 x11rb = { version = "0.13", default-features = false }
 
+# Fork: the features the glass windows need (src/fork/glass.rs), in a table
+# of their own so upstream's windows-sys line stays untouched. Cargo adds
+# them to upstream's.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Graphics_Dwm", "Win32_UI_Controls"] }
+
 [build-dependencies]
 # Compile the small macOS and Windows Soloist audio adapters.
 cc = { version = "1", optional = true }
@@ -275,6 +286,8 @@ demo = []
 # binary at compile time, so building needs cmake, a C++ compiler, and
 # libclang. `--no-default-features` leaves it out.
 milkdrop = ["dep:projectm-sys", "dep:winit", "dep:glutin", "dep:glutin-winit"]
+# Fork: Spicetify-style mods in a webview child process (src/fork/mods).
+mods = ["dep:winit", "dep:wry"]
 
 [profile.release]
 lto = "thin"
