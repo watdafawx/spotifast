@@ -44,6 +44,9 @@ use crate::api::models::ArtistRef;
 use crate::sink::{AudioControl, DeviceHook, ErrorHook, RodioSink};
 use crate::vis::{AudioTap, Tapped};
 
+/// Fork: the waveform seek bar's feed (FORK.md).
+mod fork;
+
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
     pub device_name: String,
@@ -490,6 +493,8 @@ pub struct Engine {
     /// The player came from a dropped session and still plays what that
     /// session left it, until something is loaded through this one.
     carrying: std::sync::atomic::AtomicBool,
+    /// The waveform seek bar's picture, which asks this session for keys.
+    seek_wave: Arc<crate::fork::seekwave::SeekWave>,
 }
 
 impl Engine {
@@ -514,6 +519,7 @@ impl Engine {
             ..SessionConfig::default()
         };
         let session = Session::new(session_config, Some(cache));
+        config.tap.seek_wave.set_session(Some(session.clone()));
         let carrying = kept.is_some();
         let (player, mixer, state, audio) = match kept {
             Some(kept) => (kept.player, kept.mixer, kept.state, kept.audio),
@@ -606,6 +612,7 @@ impl Engine {
             closing,
             audio,
             carrying: std::sync::atomic::AtomicBool::new(carrying),
+            seek_wave: Arc::clone(&config.tap.seek_wave),
         })
     }
 
@@ -670,6 +677,7 @@ impl Engine {
             Arc::clone(&state),
             Arc::clone(notify),
             Arc::clone(&audio),
+            fork::SeekWaveFeed::start(Arc::clone(&config.tap.seek_wave), Arc::clone(&config.eq)),
         ));
         Ok((player, mixer, state, audio))
     }
@@ -829,6 +837,7 @@ impl Engine {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.spirc.shutdown();
         self.player.stop();
+        self.seek_wave.forget_session(&self.session.session_id());
     }
 
     /// Ends the session but leaves the player playing, for an engine that
@@ -837,6 +846,7 @@ impl Engine {
         self.closing
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.spirc.shutdown();
+        self.seek_wave.forget_session(&self.session.session_id());
     }
 
     pub fn resume_point(&self) -> Option<PlaybackResume> {
@@ -1076,6 +1086,7 @@ async fn run_events(
     state: Arc<Mutex<LocalState>>,
     notify: Notify,
     audio: Arc<AudioControl>,
+    seek_wave: fork::SeekWaveFeed,
 ) {
     let mut play_request_id = None;
     while let Some(event) = events.recv().await {
@@ -1092,6 +1103,7 @@ async fn run_events(
             continue;
         }
         audio.handle_player_event(&event);
+        seek_wave.handle_player_event(&event);
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
             if apply_event(&mut current, event) {

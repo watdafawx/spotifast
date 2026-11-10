@@ -697,6 +697,8 @@ pub struct App {
     /// the first line), so it moves once per change; `None` until it has
     /// positioned itself at all for this track.
     pub lyrics_line_shown: Option<Option<usize>>,
+    /// Fork: the fork's state (src/fork).
+    pub fork: crate::fork::State,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -1129,6 +1131,7 @@ impl App {
         settings.proxy_password_legacy |= dirs.proxy_secret_file().try_exists().unwrap_or(true);
         let plays = crate::history::History::load(&dirs.history_file());
         let tap = crate::vis::AudioTap::new();
+        fork::init_tap(&tap, &dirs, &settings);
         let eq = crate::eq::shared();
         if let Ok(mut shared) = eq.lock() {
             *shared = eq_settings(&settings);
@@ -1415,6 +1418,7 @@ impl App {
             lyrics: Loadable::NotLoaded,
             lyrics_following: true,
             lyrics_line_shown: None,
+            fork: Default::default(),
             show_devices: false,
             toasts: Vec::new(),
             actions: Vec::new(),
@@ -3063,8 +3067,10 @@ impl App {
                             Ok(found) => Loadable::Loaded(found),
                             Err(error) => self.lyrics_failed(error, Instant::now()),
                         };
+                        self.fork_lyrics_loaded();
                     }
                 }
+                Event::Fork(event) => self.fork_event(event),
                 Event::PlaylistCache {
                     account_id,
                     id,
@@ -3174,6 +3180,7 @@ impl App {
                 },
                 Event::UpdateChecked { manual, result } => {
                     self.update_checking = false;
+                    let result = fork::update_checked(result);
                     match result {
                         Ok(Some(notice)) => {
                             if manual || self.update.as_ref() != Some(&notice) {
@@ -4372,6 +4379,7 @@ impl App {
             // queue column is open; a track change must refresh them.
             self.request_lyrics();
         }
+        self.fork_track_changed();
     }
 
     /// Asks what friends last played, unless an answer is on the way. The
@@ -4580,6 +4588,7 @@ impl App {
         if self.is_connected() && !self.offline {
             self.request_resume_track();
             self.ensure_resume_context_loaded();
+            self.request_playing_genres();
         }
 
         // The spinner appears once background work outlasts the quiet
@@ -5844,6 +5853,7 @@ impl App {
     }
 
     fn sync_media_controls(&mut self, ctx: &egui::Context) {
+        self.fork_sync(ctx);
         let art_file = self
             .now_playing()
             .and_then(|now| now.art_url)
@@ -9542,6 +9552,7 @@ impl App {
             }
             ApiResponse::Artist { id, result } => {
                 if let Ok(artist) = &result {
+                    self.fork_artist(&id, artist);
                     if let Some(image) = pick_image(&artist.images, 64) {
                         self.tint_for(Some(image));
                     }
@@ -12579,8 +12590,12 @@ impl App {
         ) {
             self.supersede_play_search();
         }
+        if self.fork_before_action(&action) {
+            return;
+        }
         match action {
             Action::Open(page) => self.open(page),
+            Action::Fork(action) => self.fork_action(action),
             Action::OpenSongRadio { uri, track } => self.open_song_radio(&uri, &track),
             Action::PrepareTint(url) => {
                 if self.settings.accent_from_art {
@@ -15597,10 +15612,14 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
     }
 }
 
+/// Fork: the fork's part of App (src/fork).
+mod fork;
 mod radio;
 
 #[cfg(test)]
 mod tests {
+    /// Fork: tests of the fork's part of App.
+    mod fork;
     use std::sync::Arc;
 
     use super::*;

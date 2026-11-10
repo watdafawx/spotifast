@@ -19,6 +19,9 @@ use crate::app::{App, RemoteSnapshot};
 use crate::backend::AuthStatus;
 use crate::model::*;
 
+/// Fork: the fork's fixtures and flags (FORK.md).
+mod fork;
+
 fn image(seed: u32) -> Vec<Image> {
     vec![
         Image {
@@ -471,6 +474,7 @@ pub fn populate(app: &mut App) {
         .albums
         .insert(DiscographyFilter::All.groups().to_string(), albums);
     app.artist_pages.insert("art0".into(), artist_page);
+    fork::populate(app);
     app.saved.insert("spotify:artist:art0".into(), true);
 
     // Play counts for the album's songs and the artist's popular ones.
@@ -1173,6 +1177,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
         app.open(page);
     }
     for surface in show.unwrap_or("").split(',').map(str::trim) {
+        if fork::apply_flag(app, surface) {
+            continue;
+        }
         match surface {
             "recommendations-denied-before"
             | "recommendations-denied"
@@ -2009,6 +2016,8 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Fork: tests of the fork's views.
+    mod fork;
     use crate::app::AppOptions;
     use crate::paths::AppDirs;
     use crate::settings::Settings;
