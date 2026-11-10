@@ -9,6 +9,9 @@ use crate::theme::{self, Icon};
 
 use super::widgets;
 
+/// Fork: the fork's lyrics views (FORK.md).
+pub(super) mod fork;
+
 const LINE_SIZE: f32 = 19.0;
 const LINE_GAP: f32 = 10.0;
 /// Where the line being sung sits, as a fraction of the visible lyrics from
@@ -125,6 +128,9 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn contents(app: &mut App, ui: &mut egui::Ui) {
+    if fork::REPLACES {
+        return fork::contents(app, ui);
+    }
     let palette = app.palette;
     let Some(now) = app.now_playing() else {
         widgets::empty_state(
@@ -331,6 +337,9 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
                 app.actions.push(Action::ToggleLyricsMilkdrop);
             }
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
+            if fork::mods_page(app, ui, rect, top) {
+                return;
+            }
             if app.now_playing().is_some() && rect.width() >= COVER_BESIDE_MIN_WIDTH {
                 with_cover(app, ui, rect, top);
                 return;
@@ -682,6 +691,9 @@ fn cover_opens_immersive(app: &mut App, ui: &egui::Ui, cover: Rect, art: bool) {
 }
 
 fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
+    if fork::REPLACES {
+        return fork::background(app, ui, rect);
+    }
     theme::apply_local(ui, &theme::Palette::dark());
     #[cfg(feature = "milkdrop")]
     if milkdrop_backdrop(app, ui, rect) {
@@ -799,6 +811,9 @@ fn track_heading(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
+    if fork::REPLACES {
+        return fork::fullscreen_contents(app, ui, crate::fork::lyrics_page::Look::FULLSCREEN);
+    }
     let palette = theme::Palette::dark();
     let Some(now) = app.now_playing() else {
         widgets::empty_state(
