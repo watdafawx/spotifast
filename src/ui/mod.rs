@@ -6,6 +6,8 @@ pub mod artist;
 pub mod collection;
 pub(crate) mod devices;
 mod dialogs;
+/// Fork: the fork's own views (FORK.md).
+mod fork;
 pub(crate) mod friends;
 pub mod home;
 mod keys;
@@ -154,6 +156,7 @@ fn keep_room_for_panels(app: &App, ctx: &Context) {
         panels && (app.show_queue_panel || app.show_lyrics_panel || app.show_friends_panel),
     )
     .round();
+    let width = fork::min_width(app, width, panels);
     let id = Id::new("main-min-width");
     let sent = ctx.data(|data| data.get_temp::<f32>(id));
     // The window starts at MAIN_MIN_SIZE, so there is nothing to send until
@@ -334,6 +337,9 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             // page casts a shadow under the header instead.
             ui.spacing_mut().scroll.fade.strength = 0.0;
             topbar::show(app, ui);
+            if fork::central(app, ui) {
+                return;
+            }
             // One banner at a time: a song that will not play matters more
             // than a slow app, which waits its turn.
             if app.dialog.is_none() && page != Page::Settings {
@@ -556,6 +562,9 @@ fn header_wash(
 ) -> Option<(Color32, Color32)> {
     if let Some(art) = art {
         let strength = if overview { 0.45 } else { 0.85 };
+        if let Some(wash) = fork::glass_wash(palette, art, strength) {
+            return Some(wash);
+        }
         return Some((blend(palette.window, art, strength), palette.window));
     }
     (palette.tint.a() > 0).then_some((palette.tint, Color32::TRANSPARENT))
@@ -692,6 +701,9 @@ fn caption_buttons(ui: &mut egui::Ui, palette: &theme::Palette, locale: crate::i
 }
 
 pub fn blend(base: Color32, tint: Color32, amount: f32) -> Color32 {
+    if base.a() < 255 {
+        return fork::glass_blend(base, tint, amount);
+    }
     let a = egui::Rgba::from(base);
     let b = egui::Rgba::from(tint);
     let mixed = a * (1.0 - amount) + b * amount;

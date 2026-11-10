@@ -16,6 +16,26 @@ use std::sync::Mutex;
 type UpdaterCache = Mutex<Option<(crate::settings::ProxyConfig, Updater)>>;
 static UPDATER: UpdaterCache = Mutex::new(None);
 
+/// Fork: builds with mods update from the fork's releases, so an update
+/// never swaps them for an upstream build without mods.
+#[cfg(feature = "mods")]
+const REPOSITORY: &str = "watdafawx/spotifast";
+#[cfg(not(feature = "mods"))]
+const REPOSITORY: &str = "crmne/spotifast";
+
+/// The GitHub repository this build reads its updates from, as
+/// `owner/name`, for Settings to show.
+pub const fn repository() -> &'static str {
+    REPOSITORY
+}
+
+/// Fork: the fork's releases are signed with the fork's own key (Release
+/// mods workflow, `MODS_UPDATE_SIGNING_KEY` secret), not upstream's.
+#[cfg(feature = "mods")]
+const PUBLISHER_KEY: &str = include_str!("../assets/update-public-key-mods.hex");
+#[cfg(not(feature = "mods"))]
+const PUBLISHER_KEY: &str = include_str!("../assets/update-public-key.hex");
+
 pub const CONFIG: UpdateConfig = UpdateConfig {
     macos: MacConfig {
         bundle_ids: &["rocks.spotifast.Spotifast"],
@@ -24,13 +44,13 @@ pub const CONFIG: UpdateConfig = UpdateConfig {
     },
     // Releases publish an Ed25519 signature for checksums.txt. Require it
     // before downloading an update, using the release workflow's public key.
-    publisher_key: Some(include_str!("../assets/update-public-key.hex")),
+    publisher_key: Some(PUBLISHER_KEY),
     // Releases build their AppImages before publishing, so the signed
     // checksums.txt lists them (#737): an AppImage replaces itself with the
     // next one.
     appimage: true,
     ..UpdateConfig::new(
-        "crmne/spotifast",
+        REPOSITORY,
         "Spotifast",
         "spotifast",
         env!("CARGO_PKG_VERSION"),
@@ -138,6 +158,18 @@ mod tests {
     fn update_config_is_valid() {
         CONFIG.validate().unwrap();
         assert_eq!(CONFIG.current_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Fork: a mods build must check the fork's signature, or every fork
+    /// release would be refused.
+    #[cfg(feature = "mods")]
+    #[test]
+    fn mods_builds_trust_the_forks_signing_key() {
+        assert_eq!(REPOSITORY, "watdafawx/spotifast");
+        assert_eq!(
+            CONFIG.publisher_key,
+            Some(include_str!("../assets/update-public-key-mods.hex"))
+        );
     }
 
     #[test]

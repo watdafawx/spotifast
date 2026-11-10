@@ -11,6 +11,9 @@ use crate::util;
 
 use super::widgets::{PlaylistChecks, SliderEvent, thin_slider};
 
+/// Fork: the waveform seek bar and genre line (FORK.md).
+mod fork;
+
 /// How much of the playing art's tint the bar's fill carries.
 const TINT_STRENGTH: f32 = 0.12;
 /// How long the bar takes to cross over to a new song's tint.
@@ -508,6 +511,7 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
     let heart_width = if now.is_episode { 0.0 } else { 42.0 };
     let text_left = cover_rect.right() + 12.0;
     let text_width = (region.right() - text_left - heart_width).max(40.0);
+    let genres = app.playing_genres(now);
     let displayed_text_width: f32 = {
         let title =
             ui.painter()
@@ -519,7 +523,10 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
         );
         title.size().x.max(subtitle.size().x).min(text_width)
     };
+    let displayed_text_width =
+        fork::genre_width(ui, &genres, displayed_text_width, text_width, &palette);
     let info_rect = Rect::from_min_size(pos2(text_left, cy - 18.0), vec2(text_width, 36.0));
+    let info_rect = fork::genre_rect(info_rect, &genres);
 
     let mut text_ui = ui.new_child(
         UiBuilder::new()
@@ -569,6 +576,7 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
             }
         }
     });
+    fork::genre_line(&mut text_ui, &genres, &palette, drag_sense, &mut responses);
     if responses
         .iter()
         .any(|response| response.drag_started_by(egui::PointerButton::Primary))
@@ -902,6 +910,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     );
     let slider_rect =
         Rect::from_center_size(pos2(region.center().x, row_cy), vec2(slider_width, 16.0));
+    let slider_rect = fork::seek_rect(app, now, slider_rect);
     let mut slider_ui = ui.new_child(
         UiBuilder::new()
             .max_rect(slider_rect)
@@ -912,6 +921,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     } else {
         0.0
     };
+    let thin_slider = fork::seek_slider(app, duration);
     match thin_slider(
         &mut slider_ui,
         &palette,
@@ -1122,6 +1132,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     {
         app.actions.push(Action::ToggleFriendsPanel);
     }
+    fork::extras_buttons(app, ui, transport_right);
 }
 
 #[cfg(test)]

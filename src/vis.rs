@@ -55,6 +55,9 @@ const SPEC_SCALE: f32 = 0.5;
 /// child process, when one is running.
 pub struct AudioTap {
     samples: Mutex<VecDeque<f32>>,
+    /// The waveform seek bar's picture of the playing song, filled from
+    /// the same post-equalizer, pre-volume sound.
+    pub seek_wave: Arc<crate::fork::seekwave::SeekWave>,
     /// The ring the MilkDrop child reads, attached while its window is open.
     #[cfg(feature = "milkdrop")]
     shm: Mutex<Option<std::sync::Arc<crate::milkdrop::shm::Ring>>>,
@@ -74,6 +77,7 @@ impl Default for AudioTap {
     fn default() -> Self {
         Self {
             samples: Mutex::new(VecDeque::with_capacity(KEPT)),
+            seek_wave: Arc::default(),
             #[cfg(feature = "milkdrop")]
             shm: Mutex::new(None),
             #[cfg(feature = "milkdrop")]
@@ -286,6 +290,11 @@ impl Sink for Tapped {
                     1.0
                 };
                 self.tap.push(&samples, restore);
+                // Packets of a song being skipped away from are not the
+                // next song's sound.
+                if !self.control.waiting_for_track() {
+                    self.tap.seek_wave.push(&samples, restore);
+                }
                 let attenuation = self.volume.attenuation_factor();
                 if self.applies_volume {
                     for sample in &mut samples {

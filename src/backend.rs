@@ -713,6 +713,8 @@ pub enum Command {
         update: crate::soloist::Update,
     },
     OpenThemesFolder,
+    /// Fork: the fork's own commands (src/fork).
+    Fork(crate::fork::Command),
     /// Read or change the login registration, off the UI thread: it reads
     /// and writes a file, the registry or D-Bus, and the Flatpak portal may
     /// ask the person first.
@@ -992,6 +994,8 @@ pub enum Event {
         folder: std::path::PathBuf,
         uris: Arc<std::collections::HashMap<String, std::path::PathBuf>>,
     },
+    /// Fork: the fork's own events (src/fork).
+    Fork(crate::fork::Event),
     ProxyRestored {
         config: ProxyConfig,
         password: Option<crate::credentials::ProxyPassword>,
@@ -1939,6 +1943,8 @@ struct Worker {
     /// The user asked to set up playback and the saved grant is being tried
     /// first. Only Spotify rejecting it opens the browser.
     authorize_if_rejected: bool,
+    /// Fork: the fork's part of the worker (src/backend/fork.rs).
+    fork: fork::Worker,
 }
 
 /// A failed Connect probe setup must still reconcile departed provisional rows.
@@ -2038,6 +2044,7 @@ impl Worker {
             engine_retry_generation: 0,
             engine_retry_quiet: false,
             authorize_if_rejected: false,
+            fork: fork::Worker::default(),
         }
     }
 
@@ -2745,6 +2752,7 @@ impl Worker {
                     });
                 }
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
+                Command::Fork(command) => self.fork_command(command),
                 Command::Rootlist => self.fetch_rootlist(),
                 Command::RootlistFinished { generation, result } => {
                     self.on_rootlist_finished(generation, result);
@@ -3099,6 +3107,7 @@ impl Worker {
                 }
             }
             None | Some(StoredGrant::Proxy(_) | StoredGrant::Soloist(_)) => {}
+            Some(StoredGrant::AiKeys(_)) => {}
         }
         if slot == CredentialSlot::Playback {
             self.start_prerelease();
@@ -6941,6 +6950,9 @@ fn write_playlist_manifest(
         },
     )
 }
+
+/// Fork: the fork's part of the worker.
+mod fork;
 
 #[cfg(test)]
 mod album_type_lookup_tests {
