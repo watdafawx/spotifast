@@ -110,6 +110,8 @@ enum Entry {
     Ready {
         bytes: Option<Arc<[u8]>>,
         last_used: Instant,
+        /// When it was last drawn; `None` until it is.
+        shown: Option<Instant>,
         /// The source bytes still held.
         retained: usize,
     },
@@ -191,14 +193,18 @@ impl ArtLoader {
 
     /// Marks artwork as visible so size-based eviction keeps it stable.
     pub fn touch(&self, url: &str) {
-        if let Some(Entry::Ready { last_used, .. }) = self
+        if let Some(Entry::Ready {
+            last_used, shown, ..
+        }) = self
             .inner
             .entries
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(url)
         {
-            *last_used = Instant::now();
+            let now = Instant::now();
+            *last_used = now;
+            *shown = Some(now);
         }
     }
 
@@ -224,7 +230,7 @@ impl ArtLoader {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             let mut failed: Vec<String> = Vec::new();
-            let mut held: Vec<(String, Instant, usize)> = Vec::new();
+            let mut held: Vec<Held> = Vec::new();
             for (url, entry) in entries.iter() {
                 let scaled: usize = textures
                     .get(url)
@@ -234,15 +240,21 @@ impl ArtLoader {
                     Entry::Failed(_) => failed.push(url.clone()),
                     Entry::Ready {
                         last_used,
+                        shown,
                         retained,
                         ..
                     } => {
-                        held.push((url.clone(), *last_used, *retained + scaled));
+                        held.push(Held {
+                            url: url.clone(),
+                            last_used: *last_used,
+                            shown: *shown,
+                            bytes: *retained + scaled,
+                        });
                     }
                     Entry::Pending => {}
                 }
             }
-            failed.extend(over_budget(held, HELD_BYTES));
+            failed.extend(evictable(held, HELD_BYTES));
             failed
         };
         for url in letting_go {
@@ -371,6 +383,38 @@ impl ArtLoader {
         }
         Ok(removed)
     }
+}
+
+/// Artwork the cache holds, as eviction weighs it.
+struct Held {
+    url: String,
+    last_used: Instant,
+    shown: Option<Instant>,
+    bytes: usize,
+}
+
+/// Artwork drawn within this long of the most recently drawn is on screen:
+/// one frame draws everything visible within a few milliseconds.
+const SHOWN_TOGETHER: Duration = Duration::from_millis(500);
+
+/// Which artwork to let go of. What the latest frame drew stays, however
+/// much it is: forgetting it blanks covers on screen until they reload, which
+/// happened every eviction once a large window showed more than the budget.
+/// The rest fits what that leaves, oldest first.
+fn evictable(held: Vec<Held>, budget: usize) -> Vec<String> {
+    let latest = held.iter().filter_map(|held| held.shown).max();
+    let (visible, rest): (Vec<Held>, Vec<Held>) = held.into_iter().partition(|held| {
+        held.shown
+            .zip(latest)
+            .is_some_and(|(shown, latest)| latest.duration_since(shown) <= SHOWN_TOGETHER)
+    });
+    let visible_bytes: usize = visible.iter().map(|held| held.bytes).sum();
+    over_budget(
+        rest.into_iter()
+            .map(|held| (held.url, held.last_used, held.bytes))
+            .collect(),
+        budget.saturating_sub(visible_bytes),
+    )
 }
 
 /// Takes out of `textures` the copies of a cover last painted more than
@@ -552,6 +596,7 @@ impl Inner {
                     retained: bytes.len(),
                     bytes: Some(bytes),
                     last_used: Instant::now(),
+                    shown: None,
                 },
                 Err(error) => Entry::Failed(error),
             };
@@ -1502,6 +1547,7 @@ mod tests {
                 retained: 0,
                 bytes: None,
                 last_used: Instant::now(),
+                shown: None,
             },
         );
         let mut backdrop = LyricsBackdrop::default();
@@ -1618,6 +1664,7 @@ mod tests {
                 retained: bytes.len(),
                 bytes: Some(bytes),
                 last_used: Instant::now(),
+                shown: None,
             },
         );
         let decoded_bytes = |ctx: &egui::Context| -> usize {
@@ -2010,6 +2057,7 @@ mod tests {
                 retained: payload.len(),
                 bytes: Some(payload),
                 last_used: Instant::now(),
+                shown: None,
             },
         );
         runtime.block_on(async {
@@ -2080,6 +2128,32 @@ mod tests {
         assert!(over_budget(Vec::new(), 0).is_empty());
     }
 
+    /// Covers the latest frame drew are never forgotten, even over budget;
+    /// what is not on screen goes first to make room.
+    #[test]
+    fn eviction_keeps_what_is_on_screen() {
+        let now = Instant::now();
+        let ago = |ms: u64| now.checked_sub(Duration::from_millis(ms)).unwrap_or(now);
+        let held = |url: &str, used: Instant, shown: Option<Instant>, bytes: usize| Held {
+            url: url.to_string(),
+            last_used: used,
+            shown,
+            bytes,
+        };
+        let art = vec![
+            // On screen, though loaded first: oldest by use.
+            held("sidebar", ago(60_000), Some(ago(5)), 600),
+            held("shelf", ago(50_000), Some(now), 600),
+            // Fetched later (a tint) and never drawn.
+            held("tint", ago(10), None, 300),
+            // Drawn long ago, on a page left behind.
+            held("old page", ago(40_000), Some(ago(40_000)), 300),
+        ];
+        let mut gone = evictable(art, 1000);
+        gone.sort();
+        assert_eq!(gone, ["old page", "tint"]);
+    }
+
     fn retained_total(loader: &ArtLoader) -> usize {
         let encoded: usize = loader
             .inner
@@ -2133,6 +2207,7 @@ mod tests {
                 Entry::Ready {
                     bytes: Some(Arc::from(vec![0u8; jpeg])),
                     last_used: now - Duration::from_secs(40 - i),
+                    shown: None,
                     retained: jpeg,
                 },
             );
@@ -2731,6 +2806,7 @@ mod tests {
             Entry::Ready {
                 bytes: None,
                 last_used: Instant::now(),
+                shown: None,
                 retained: 0,
             },
         );
