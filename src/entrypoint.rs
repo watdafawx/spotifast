@@ -366,6 +366,8 @@ pub(crate) fn run() -> eframe::Result<()> {
     if let Some(args) = spotifast::milkdrop::child::Args::parse() {
         std::process::exit(spotifast::milkdrop::child::run(args));
     }
+    // Fork: the mods webview child process, the same way.
+    spotifast::fork::run_child();
 
     let cli = Cli::from_arg_matches(&Cli::command().get_matches_from(&launch.arguments))
         .unwrap_or_else(|error| error.exit());
@@ -723,6 +725,7 @@ pub(crate) fn run() -> eframe::Result<()> {
                 }
             }
             app.attach(&cc.egui_ctx);
+            spotifast::fork::attach_window(cc, !app.settings.winamp_window);
             #[cfg(windows)]
             let thumbbar = {
                 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -961,6 +964,8 @@ fn native_options(
             }
         }
     };
+    // Fork: the main window is see-through for glass themes.
+    let viewport = spotifast::fork::window_viewport(viewport, persist_window);
     eframe::NativeOptions {
         viewport,
         persist_window,
@@ -1619,6 +1624,9 @@ impl eframe::App for Shell {
     /// The mini player's window is see-through where the skin leaves it
     /// out; the big window paints itself over eframe's own ground.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if spotifast::fork::SEE_THROUGH {
+            return [0.0; 4];
+        }
         if self.app.settings.winamp_window {
             [0.0; 4]
         } else {

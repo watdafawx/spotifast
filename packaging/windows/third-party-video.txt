@@ -1,0 +1,28 @@
+Spotifast (mods) bundles two programs beside spotifast.exe for the music
+video behind full-screen lyrics. Spotifast loads or runs them unchanged;
+they are not part of Spotifast and keep their own licences.
+
+libmpv-2.dll
+  mpv's library, from shinchiro's mpv-winbuild-cmake build
+  mpv-dev-x86_64-20261101-git-48fca90e8c (mpv commit 48fca90e8c).
+  mpv is licensed under the GNU GPL version 2 or later, or the GNU LGPL
+  version 2.1 or later when built without its GPL parts. This build
+  includes GPL libraries (x264, x265, and others), so it is distributed
+  under the GNU GPL. Source code:
+    https://github.com/mpv-player/mpv/tree/48fca90e8c
+    https://github.com/shinchiro/mpv-winbuild-cmake (the build scripts
+    and the sources of every bundled library)
+  Licence texts: https://github.com/mpv-player/mpv/blob/master/Copyright
+
+yt-dlp.exe
+  yt-dlp 2026.10.26, from https://github.com/yt-dlp/yt-dlp/releases
+  Released into the public domain under the Unlicense:
+    https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE
+  The executable bundles Python and other components under their own
+  licences, listed in its THIRD_PARTY_LICENSES.txt:
+    https://github.com/yt-dlp/yt-dlp/blob/master/THIRD_PARTY_LICENSES.txt
+
+YouTube changes often, and an old yt-dlp then stops finding videos. To use
+a newer one, put its yt-dlp.exe in this folder in place of the bundled one,
+or run "yt-dlp.exe -U" here, and restart Spotifast. Updating Spotifast
+keeps a yt-dlp.exe that is newer than the one it brings.

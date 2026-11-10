@@ -9,6 +9,9 @@ use crate::model::{Action, Dialog, DragEntry, DragTrack, Loadable, Page};
 use crate::settings::{LIKED_SONGS_KEY, LibraryShelf as Filter, LibrarySort};
 use crate::theme::{self, Icon, Palette};
 
+/// Fork: the collapsed Library (FORK.md).
+pub(crate) mod fork;
+
 const DEFAULT_ROW_HEIGHT: f32 = 60.0;
 const COMPACT_ROW_HEIGHT: f32 = 32.0;
 
@@ -540,6 +543,9 @@ fn permute<T>(entries: &mut [T], order: &[usize]) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    if fork::REPLACES {
+        return fork::show(app, ui);
+    }
     let palette = app.palette;
     let expanded_art = has_expanded_art(app);
     let floating_art = app.settings.sidebar_grid && expanded_art;
@@ -1083,6 +1089,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
         ui.add_space(6.0);
         theme::icon(ui, Icon::Library, 22.0, palette.secondary);
         ui.add_space(2.0);
+        fork::collapse_button(app, ui);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if theme::icon_button(

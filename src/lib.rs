@@ -16,6 +16,8 @@ pub mod demo;
 pub mod device_history;
 pub mod emoji;
 pub mod eq;
+/// Fork: everything the fork adds (FORK.md).
+pub mod fork;
 pub mod history;
 pub mod http;
 #[cfg(target_os = "linux")]
