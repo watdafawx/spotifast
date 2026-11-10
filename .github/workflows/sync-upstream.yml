@@ -1,7 +1,8 @@
 # Fork only: merge crmne/spotifast into the mods branch every day.
 #
 # merge (Linux): merges upstream/main into mods. A Cargo.lock clash takes
-# upstream's lockfile and lets cargo add the fork's crates back. Any other
+# upstream's lockfile and lets cargo add the fork's crates back; when that
+# was the only clash the merge is finished and no agent runs. Any other
 # conflict is handed to Claude (claude-code-action), which resolves it by
 # FORK.md's rules and stages the result; it may only read, edit and stage
 # files. The merge goes to sync/upstream for the next job.
@@ -54,11 +55,24 @@ jobs:
           elif git merge --no-edit upstream/main; then
             echo "result=merged" >> "$GITHUB_OUTPUT"
           else
-            echo "result=conflict" >> "$GITHUB_OUTPUT"
             {
               echo "Conflicting files:"
               git diff --name-only --diff-filter=U | sed 's/^/- /'
             } >> "$GITHUB_STEP_SUMMARY"
+            # The lockfile is never worth an agent: take upstream's and let
+            # cargo add the fork's crates back. A merge that only clashes
+            # there is then finished, and Claude is not started at all.
+            if git diff --name-only --diff-filter=U | grep -qx Cargo.lock; then
+              git checkout --theirs Cargo.lock
+              cargo metadata --features mods --format-version 1 > /dev/null
+              git add Cargo.lock
+            fi
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              echo "result=conflict" >> "$GITHUB_OUTPUT"
+            else
+              git commit --no-edit
+              echo "result=merged" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Resolve conflicts with Claude
