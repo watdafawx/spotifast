@@ -1,0 +1,262 @@
+# Fork only: Spotifast with mods, released on this fork, which is where builds
+# with mods look for updates (src/updates.rs). Upstream's Release workflow stays
+# off here: it signs with upstream's key and publishes upstream's packages.
+#
+# Versions: Cargo.toml keeps upstream's version, so it never conflicts. A
+# fork release of upstream's MAJOR.MINOR.PATCH is MAJOR.MINOR.(PATCH*100+n),
+# n counting from 0: upstream 0.17.1 gives 0.17.100, 0.17.101, ... and
+# upstream 0.18.0 gives 0.18.0, 0.18.1, ... Every fork release sorts above
+# the upstream release it is built on and below the next one's.
+#
+# On each push to mods and after each Sync upstream: when upstream's version
+# has no fork release yet, the mods build is published as its n = 0. Run it
+# by hand to publish fork-only changes as the next n, or with `force` to
+# rebuild and replace the latest fork release of that version. The release's
+# tag points at the mods commit it was built from.
+#
+# Needs the MODS_UPDATE_SIGNING_KEY secret: the Ed25519 private key (PEM)
+# whose public half is assets/update-public-key-mods.hex. Mods builds refuse
+# an update whose checksums.txt.sig does not verify against that key.
+name: Release mods
+
+on:
+  push:
+    branches: [mods]
+  workflow_run:
+    workflows: ["Sync upstream"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Replace the latest fork release instead of adding the next one
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# One at a time, so a second trigger for the same commit finds the release.
+concurrency:
+  group: release-mods
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: mods
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          upstream=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if ! [[ "$upstream" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Upstream's version $upstream is a prerelease; no fork release." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          major=${BASH_REMATCH[1]}
+          minor=${BASH_REMATCH[2]}
+          base=$((BASH_REMATCH[3] * 100))
+          # The highest n already released for this upstream version, if any.
+          last=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 500 --json tagName --jq '.[].tagName' \
+            | sed -n "s/^v$major\.$minor\.\([0-9][0-9]*\)$/\1/p" \
+            | awk -v b="$base" '$1 >= b && $1 < b + 100 { print $1 - b }' | sort -n | tail -1)
+          if [ -z "$last" ]; then
+            n=0
+          elif [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "Upstream $upstream has fork release n=$last already." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          elif [ "$FORCE" = "true" ]; then
+            n=$last
+          else
+            n=$((last + 1))
+          fi
+          if [ "$n" -ge 100 ]; then
+            echo "::error::100 fork releases of upstream $upstream; the scheme has no room for more."
+            exit 1
+          fi
+          tag="v$major.$minor.$((base + n))"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag (upstream $upstream) from mods at $(git rev-parse --short HEAD)." >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.tag != ''
+    runs-on: windows-latest
+    env:
+      CMAKE_GENERATOR: Ninja
+      CARGO_TERM_COLOR: always
+      TAG: ${{ needs.plan.outputs.tag }}
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - run: rustup target add x86_64-pc-windows-msvc
+      # As upstream's Release: GLEW for libprojectM from vcpkg's static-CRT
+      # triplet, and Ninja inside the MSVC environment.
+      - run: vcpkg install glew:x64-windows-static
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      # The fork's version goes into Cargo.toml for this build only.
+      - name: Set the version
+        shell: bash
+        run: |
+          sed -i "0,/^version = .*/s//version = \"${TAG#v}\"/" Cargo.toml
+          grep -m1 '^version' Cargo.toml
+      - run: cargo build --release --target x86_64-pc-windows-msvc --features mods
+
+      - name: Check the binary
+        shell: pwsh
+        run: |
+          $binary = "target\$env:TARGET\release\spotifast.exe"
+          $imports = & dumpbin /dependents $binary | Out-String
+          if ($imports -match 'MSVCP[0-9_]*\.dll|VCRUNTIME[0-9_]*\.dll') { throw "Spotifast imports an MSVC runtime" }
+          $version = (& $binary --version | Out-String).Trim()
+          if ($version -ne "spotifast $($env:TAG.TrimStart('v'))") { throw "Unexpected --version output: $version" }
+
+      # Video behind full-screen lyrics (src/fork/lyrics_video.rs) loads
+      # libmpv-2.dll and runs yt-dlp.exe from beside spotifast.exe. Both are
+      # pinned and checked against these digests, then shipped in the zip
+      # and the installer, so checksums.txt and its signature cover them.
+      # shinchiro keeps about six weeks of daily builds on GitHub; the same
+      # files stay on the project's SourceForge mirror after that.
+      # Moving to newer builds changes all six values together, and the
+      # versions in FORK.md and packaging/windows/third-party-video.txt.
+      - name: Video components
+        shell: bash
+        env:
+          MPV_BUILD: "20261101"
+          MPV_ARCHIVE: mpv-dev-x86_64-20261101-git-48fca90e8c.7z
+          MPV_ARCHIVE_SHA256: 30d3f9fa121ce24638610a9ae52f8957743f9dea416dd37dc4ff7e43589ef843
+          LIBMPV_SHA256: f40293dc5f4012f3f7bcc79de2b9bfb66309b87dbd33a47ee49ebff716eb8154
+          YT_DLP_VERSION: "2026.10.26"
+          YT_DLP_SHA256: f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d
+        run: |
+          mkdir -p video
+          cd video
+          curl -fsSL --retry 3 -o mpv.7z \
+            "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/${MPV_BUILD}/${MPV_ARCHIVE}" \
+            || curl -fsSL --retry 3 -o mpv.7z \
+              "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/${MPV_ARCHIVE}"
+          echo "${MPV_ARCHIVE_SHA256}  mpv.7z" | sha256sum -c -
+          7z e -y mpv.7z libmpv-2.dll > /dev/null
+          rm mpv.7z
+          echo "${LIBMPV_SHA256}  libmpv-2.dll" | sha256sum -c -
+          curl -fsSL --retry 3 -o yt-dlp.exe \
+            "https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp.exe"
+          echo "${YT_DLP_SHA256}  yt-dlp.exe" | sha256sum -c -
+          test "$(./yt-dlp.exe --version | tr -d '\r')" = "$YT_DLP_VERSION"
+
+      # The names the updater asks for: spotifast-<tag>-<target>.zip and -setup.exe
+      - name: Package
+        shell: bash
+        run: |
+          name="spotifast-${TAG}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp "target/${TARGET}/release/spotifast.exe" README.md LICENSE packaging/spotifast-portable.txt \
+            video/libmpv-2.dll video/yt-dlp.exe packaging/windows/third-party-video.txt "dist/$name/"
+          cd dist
+          7z a "$name.zip" "$name"
+          rm -r "$name"
+      - name: Installer
+        shell: pwsh
+        run: |
+          # The video components go into the installer beside the app. Added
+          # here, not in upstream's spotifast.iss, so that file never conflicts.
+          $iss = 'packaging\windows\spotifast.iss'
+          $anchor = 'Source: "spotifast-installer.txt"; DestDir: "{app}"; Flags: ignoreversion'
+          $text = Get-Content -Raw $iss
+          if (-not $text.Contains($anchor)) { throw "spotifast.iss changed: no line to add the video components after" }
+          $video = @(
+            $anchor,
+            '; Fork (Release mods): the video behind full-screen lyrics. yt-dlp.exe has',
+            '; no ignoreversion, so a newer one the user put in its place is kept.',
+            'Source: "{#VideoDir}\libmpv-2.dll"; DestDir: "{app}"; Flags: ignoreversion',
+            'Source: "{#VideoDir}\yt-dlp.exe"; DestDir: "{app}"',
+            'Source: "third-party-video.txt"; DestDir: "{app}"; Flags: ignoreversion'
+          ) -join "`r`n"
+          [IO.File]::WriteAllText((Join-Path $PWD $iss), $text.Replace($anchor, $video))
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DVersion=$($env:TAG.TrimStart('v'))" "/DArch=x86_64" `
+            "/DBinary=$PWD\target\$env:TARGET\release\spotifast.exe" `
+            "/DVideoDir=$PWD\video" `
+            "/DOutputDir=$PWD\dist" packaging\windows\spotifast.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  # Signing and publishing apart from the build, so the signing key never
+  # reaches a job that runs build scripts.
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: dist
+
+      - name: Checksums
+        run: python3 packaging/release-names.py dist "$TAG"
+
+      # checksums.txt.sig: the raw 64-byte Ed25519 signature over the exact
+      # bytes of checksums.txt, which fastframe-update checks against the
+      # key mods builds embed. Verified here against the committed key.
+      - name: Sign checksums
+        env:
+          MODS_UPDATE_SIGNING_KEY: ${{ secrets.MODS_UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$MODS_UPDATE_SIGNING_KEY" ]; then
+            echo "::error::MODS_UPDATE_SIGNING_KEY is not set; mods builds would refuse an unsigned release."
+            exit 1
+          fi
+          key="$RUNNER_TEMP/signing-key.pem"
+          umask 077
+          printf '%s\n' "$MODS_UPDATE_SIGNING_KEY" > "$key"
+          openssl pkeyutl -sign -inkey "$key" -rawin -in dist/checksums.txt -out dist/checksums.txt.sig
+          rm -f "$key"
+          test "$(wc -c < dist/checksums.txt.sig)" -eq 64
+          der="$RUNNER_TEMP/public-key.der"
+          # SubjectPublicKeyInfo prefix for an Ed25519 key, then the 32 bytes.
+          python3 -c 'import sys; open(sys.argv[2], "wb").write(bytes.fromhex("302a300506032b6570032100" + open(sys.argv[1]).read().strip()))' \
+            assets/update-public-key-mods.hex "$der"
+          openssl pkeyutl -verify -pubin -keyform DER -inkey "$der" -rawin \
+            -in dist/checksums.txt -sigfile dist/checksums.txt.sig
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -f "$TAG" "$SHA"
+          git push -f origin "refs/tags/$TAG"
+          notes="packaging/release-notes/$TAG.md"
+          {
+            echo "Spotifast $TAG with mods, built from this fork's mods branch at ${SHA:0:7}."
+            echo
+            if [ -f "$notes" ]; then cat "$notes"; fi
+          } > "$RUNNER_TEMP/notes.md"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Spotifast $TAG (mods)" \
+            --notes-file "$RUNNER_TEMP/notes.md" --latest
