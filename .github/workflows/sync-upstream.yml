@@ -93,6 +93,15 @@ jobs:
               continue
             fi
             if ! git cherry-pick --empty=drop "$commit"; then
+              # Release notes for a version upstream has now shipped itself:
+              # both sides added the file. Upstream's copy wins.
+              conflicts=$(git diff --name-only --diff-filter=U)
+              if [ -n "$conflicts" ] && ! echo "$conflicts" | grep -qv '^packaging/release-notes/[^/]*\.md$'; then
+                echo "$conflicts" | while read -r f; do git checkout --ours -- "$f"; git add -- "$f"; done
+                if GIT_EDITOR=true git cherry-pick --continue || git cherry-pick --skip; then
+                  continue
+                fi
+              fi
               {
                 echo "### Conflict"
                 echo
